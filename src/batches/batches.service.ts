@@ -1,87 +1,109 @@
 import { Injectable, NotFoundException, ConflictException } from '@nestjs/common';
-import { PrismaService } from '../prisma/prisma.service';
+import { DatabaseService } from '../database/database.service';
 import { CreateBatchDto } from './dto/create-batch.dto';
 import { UpdateBatchDto } from './dto/update-batch.dto';
 import { PaginationDto, paginate } from '../common/dto/pagination.dto';
+import { v4 as uuidv4 } from 'uuid';
+
+const BATCH_SQL = `
+  SELECT b.*,
+    json_build_object('id', p.id, 'sku', p.sku, 'name', p.name) AS product
+  FROM batches b
+  JOIN products p ON p.id = b."productId"
+`;
 
 @Injectable()
 export class BatchesService {
-  constructor(private prisma: PrismaService) {}
+  constructor(private db: DatabaseService) {}
 
   async findAll(query: PaginationDto & { productId?: string }) {
-    const where: any = {};
-    if (query.productId) where.productId = query.productId;
+    const params: any[] = [];
+    const conditions: string[] = [];
+
+    if (query.productId) { params.push(query.productId); conditions.push(`b."productId" = $${params.length}`); }
     if (query.search) {
-      where.batchNumber = { contains: query.search, mode: 'insensitive' };
+      params.push(`%${query.search}%`);
+      conditions.push(`b."batchNumber" ILIKE $${params.length}`);
     }
 
-    const [data, total] = await Promise.all([
-      this.prisma.batch.findMany({
-        where,
-        skip: query.skip,
-        take: query.limit,
-        orderBy: { batchNumber: 'asc' },
-        include: { product: { select: { id: true, sku: true, name: true } } },
-      }),
-      this.prisma.batch.count({ where }),
-    ]);
+    const where = conditions.length ? `WHERE ${conditions.join(' AND ')}` : '';
+    params.push(query.limit, query.skip);
+    const limitIdx = params.length - 1;
+    const offsetIdx = params.length;
 
-    return paginate(data, total, query.page, query.limit);
+    const data = await this.db.query(
+      `${BATCH_SQL} ${where} ORDER BY b."batchNumber" ASC LIMIT $${limitIdx} OFFSET $${offsetIdx}`,
+      params,
+    );
+
+    const countParams = params.slice(0, params.length - 2);
+    const [{ count }] = await this.db.query<{ count: string }>(
+      `SELECT COUNT(*)::int AS count FROM batches b ${where}`,
+      countParams,
+    );
+
+    return paginate(data, Number(count), query.page, query.limit);
   }
 
   async findOne(id: string) {
-    const batch = await this.prisma.batch.findUnique({
-      where: { id },
-      include: { product: { select: { id: true, sku: true, name: true } } },
-    });
+    const batch = await this.db.queryOne(`${BATCH_SQL} WHERE b.id = $1`, [id]);
     if (!batch) throw new NotFoundException(`Batch ${id} not found`);
     return batch;
   }
 
   async create(dto: CreateBatchDto) {
-    const dup = await this.prisma.batch.findUnique({
-      where: { productId_batchNumber: { productId: dto.productId, batchNumber: dto.batchNumber } },
-    });
+    const dup = await this.db.queryOne(
+      `SELECT id FROM batches WHERE "productId" = $1 AND "batchNumber" = $2`,
+      [dto.productId, dto.batchNumber],
+    );
     if (dup) throw new ConflictException(`Batch '${dto.batchNumber}' already exists for this product`);
 
-    return this.prisma.batch.create({
-      data: {
-        productId: dto.productId,
-        batchNumber: dto.batchNumber,
-        manufacturingDate: dto.manufacturingDate ? new Date(dto.manufacturingDate) : null,
-        expiryDate: dto.expiryDate ? new Date(dto.expiryDate) : null,
-      },
-      include: { product: { select: { id: true, sku: true, name: true } } },
-    });
+    const [row] = await this.db.query(`
+      INSERT INTO batches (id, "productId", "batchNumber", "manufacturingDate", "expiryDate")
+      VALUES ($1, $2, $3, $4, $5) RETURNING *
+    `, [
+      uuidv4(), dto.productId, dto.batchNumber,
+      dto.manufacturingDate ? new Date(dto.manufacturingDate) : null,
+      dto.expiryDate ? new Date(dto.expiryDate) : null,
+    ]);
+
+    return this.findOne(row.id);
   }
 
   async update(id: string, dto: UpdateBatchDto) {
-    const batch = await this.findOne(id);
+    const batch = await this.findOne(id) as any;
 
     if (dto.batchNumber) {
-      const dup = await this.prisma.batch.findFirst({
-        where: {
-          productId: batch.productId,
-          batchNumber: dto.batchNumber,
-          NOT: { id },
-        },
-      });
+      const dup = await this.db.queryOne(
+        `SELECT id FROM batches WHERE "productId" = $1 AND "batchNumber" = $2 AND id != $3`,
+        [batch.productId, dto.batchNumber, id],
+      );
       if (dup) throw new ConflictException(`Batch number '${dto.batchNumber}' already in use`);
     }
 
-    return this.prisma.batch.update({
-      where: { id },
-      data: {
-        batchNumber: dto.batchNumber,
-        manufacturingDate: dto.manufacturingDate ? new Date(dto.manufacturingDate) : undefined,
-        expiryDate: dto.expiryDate ? new Date(dto.expiryDate) : undefined,
-      },
-      include: { product: { select: { id: true, sku: true, name: true } } },
-    });
+    const fields: string[] = [];
+    const params: any[] = [];
+
+    if (dto.batchNumber) { params.push(dto.batchNumber); fields.push(`"batchNumber" = $${params.length}`); }
+    if (dto.manufacturingDate !== undefined) {
+      params.push(dto.manufacturingDate ? new Date(dto.manufacturingDate) : null);
+      fields.push(`"manufacturingDate" = $${params.length}`);
+    }
+    if (dto.expiryDate !== undefined) {
+      params.push(dto.expiryDate ? new Date(dto.expiryDate) : null);
+      fields.push(`"expiryDate" = $${params.length}`);
+    }
+
+    if (fields.length === 0) return batch;
+
+    params.push(id);
+    await this.db.query(`UPDATE batches SET ${fields.join(', ')} WHERE id = $${params.length}`, params);
+    return this.findOne(id);
   }
 
   async remove(id: string) {
     await this.findOne(id);
-    return this.prisma.batch.delete({ where: { id } });
+    const [row] = await this.db.query(`DELETE FROM batches WHERE id = $1 RETURNING *`, [id]);
+    return row;
   }
 }

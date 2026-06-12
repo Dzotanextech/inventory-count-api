@@ -1,337 +1,292 @@
-import {
-  Injectable,
-  NotFoundException,
-  BadRequestException,
-} from '@nestjs/common';
-import { PrismaService } from '../prisma/prisma.service';
+import { Injectable, NotFoundException, BadRequestException } from '@nestjs/common';
+import { DatabaseService } from '../database/database.service';
 import { AuditService } from '../audit/audit.service';
 import { CreateInventoryCountDto } from './dto/create-inventory-count.dto';
 import { QueryInventoryCountDto } from './dto/query-inventory-count.dto';
 import { paginate } from '../common/dto/pagination.dto';
-import { InventoryCountStatus, InventoryCountType, ApprovalAction, Prisma } from '@prisma/client';
+import { InventoryCountStatus, InventoryCountType, ApprovalAction } from '../common/enums';
+import { v4 as uuidv4 } from 'uuid';
 
-const COUNT_INCLUDE = {
-  warehouse: { select: { id: true, code: true, name: true } },
-  createdBy: { select: { id: true, name: true, email: true } },
-  submittedBy: { select: { id: true, name: true } },
-  approvedBy: { select: { id: true, name: true } },
-  _count: { select: { items: true } },
-};
+const COUNT_SQL = `
+  SELECT ic.*,
+    json_build_object('id', w.id, 'code', w.code, 'name', w.name) AS warehouse,
+    json_build_object('id', cb.id, 'name', cb.name, 'email', cb.email) AS "createdBy",
+    CASE WHEN sb.id IS NOT NULL THEN json_build_object('id', sb.id, 'name', sb.name) END AS "submittedBy",
+    CASE WHEN ab.id IS NOT NULL THEN json_build_object('id', ab.id, 'name', ab.name) END AS "approvedBy",
+    (SELECT COUNT(*)::int FROM inventory_count_items ici WHERE ici."inventoryCountId" = ic.id) AS "itemCount"
+  FROM inventory_counts ic
+  JOIN warehouses w ON w.id = ic."warehouseId"
+  JOIN users cb ON cb.id = ic."createdById"
+  LEFT JOIN users sb ON sb.id = ic."submittedById"
+  LEFT JOIN users ab ON ab.id = ic."approvedById"
+`;
 
 @Injectable()
 export class InventoryCountsService {
   constructor(
-    private prisma: PrismaService,
+    private db: DatabaseService,
     private auditService: AuditService,
   ) {}
 
   async findAll(query: QueryInventoryCountDto) {
-    const where: Prisma.InventoryCountWhereInput = {};
-    if (query.warehouseId) where.warehouseId = query.warehouseId;
-    if (query.status) where.status = query.status;
-    if (query.countType) where.countType = query.countType;
+    const params: any[] = [];
+    const conditions: string[] = [];
+
+    if (query.warehouseId) { params.push(query.warehouseId); conditions.push(`ic."warehouseId" = $${params.length}`); }
+    if (query.status) { params.push(query.status); conditions.push(`ic.status = $${params.length}`); }
+    if (query.countType) { params.push(query.countType); conditions.push(`ic."countType" = $${params.length}`); }
     if (query.search) {
-      where.OR = [
-        { countNumber: { contains: query.search, mode: 'insensitive' } },
-        { notes: { contains: query.search, mode: 'insensitive' } },
-      ];
+      params.push(`%${query.search}%`);
+      conditions.push(`(ic."countNumber" ILIKE $${params.length} OR ic.notes ILIKE $${params.length})`);
     }
 
-    const [data, total] = await Promise.all([
-      this.prisma.inventoryCount.findMany({
-        where,
-        skip: query.skip,
-        take: query.limit,
-        orderBy: { createdAt: 'desc' },
-        include: COUNT_INCLUDE,
-      }),
-      this.prisma.inventoryCount.count({ where }),
-    ]);
+    const where = conditions.length ? `WHERE ${conditions.join(' AND ')}` : '';
+    params.push(query.limit, query.skip);
+    const limitIdx = params.length - 1;
+    const offsetIdx = params.length;
 
-    return paginate(data, total, query.page, query.limit);
+    const data = await this.db.query(
+      `${COUNT_SQL} ${where} ORDER BY ic."createdAt" DESC LIMIT $${limitIdx} OFFSET $${offsetIdx}`,
+      params,
+    );
+
+    const countParams = params.slice(0, params.length - 2);
+    const [{ count }] = await this.db.query<{ count: string }>(
+      `SELECT COUNT(*)::int AS count FROM inventory_counts ic ${where}`,
+      countParams,
+    );
+
+    const shaped = data.map((r) => ({ ...r, _count: { items: r.itemCount }, itemCount: undefined }));
+    return paginate(shaped, Number(count), query.page, query.limit);
   }
 
   async findOne(id: string) {
-    const count = await this.prisma.inventoryCount.findUnique({
-      where: { id },
-      include: {
-        ...COUNT_INCLUDE,
-        items: {
-          include: {
-            product: { select: { id: true, sku: true, name: true, uom: true, costPrice: true } },
-            batch: { select: { id: true, batchNumber: true, expiryDate: true } },
-            rack: { select: { id: true, rackCode: true, barcode: true } },
-            countedBy: { select: { id: true, name: true } },
-          },
-          orderBy: { product: { name: 'asc' } },
-        },
-        approvals: {
-          include: { performedBy: { select: { id: true, name: true } } },
-          orderBy: { createdAt: 'asc' },
-        },
-      },
-    });
-
+    const count = await this.db.queryOne<any>(`${COUNT_SQL} WHERE ic.id = $1`, [id]);
     if (!count) throw new NotFoundException(`Inventory count ${id} not found`);
-    return count;
+
+    const items = await this.db.query(`
+      SELECT ici.*,
+        json_build_object('id', p.id, 'sku', p.sku, 'name', p.name, 'uom', p.uom, 'costPrice', p."costPrice") AS product,
+        CASE WHEN b.id IS NOT NULL THEN json_build_object('id', b.id, 'batchNumber', b."batchNumber", 'expiryDate', b."expiryDate") END AS batch,
+        CASE WHEN r.id IS NOT NULL THEN json_build_object('id', r.id, 'rackCode', r."rackCode", 'barcode', r.barcode) END AS rack,
+        CASE WHEN u.id IS NOT NULL THEN json_build_object('id', u.id, 'name', u.name) END AS "countedBy"
+      FROM inventory_count_items ici
+      JOIN products p ON p.id = ici."productId"
+      LEFT JOIN batches b ON b.id = ici."batchId"
+      LEFT JOIN racks r ON r.id = ici."rackId"
+      LEFT JOIN users u ON u.id = ici."countedById"
+      WHERE ici."inventoryCountId" = $1
+      ORDER BY p.name ASC
+    `, [id]);
+
+    const approvals = await this.db.query(`
+      SELECT a.*,
+        json_build_object('id', u.id, 'name', u.name) AS "performedBy"
+      FROM approvals a
+      JOIN users u ON u.id = a."performedById"
+      WHERE a."inventoryCountId" = $1
+      ORDER BY a."createdAt" ASC
+    `, [id]);
+
+    return { ...count, items, approvals };
   }
 
   async create(dto: CreateInventoryCountDto, userId: string) {
     const countNumber = await this.generateCountNumber();
 
-    const locationWhere: Prisma.InventoryLocationWhereInput = {
-      warehouseId: dto.warehouseId,
-    };
+    const locationConditions: string[] = [`il."warehouseId" = $1`];
+    const locationParams: any[] = [dto.warehouseId];
 
     if (dto.countType === InventoryCountType.CATEGORY && dto.categoryId) {
-      locationWhere.product = { categoryId: dto.categoryId };
+      locationParams.push(dto.categoryId);
+      locationConditions.push(`p."categoryId" = $${locationParams.length}`);
     } else if (dto.countType === InventoryCountType.PRODUCT && dto.productIds?.length) {
-      locationWhere.productId = { in: dto.productIds };
+      locationParams.push(dto.productIds);
+      locationConditions.push(`il."productId" = ANY($${locationParams.length})`);
     } else if (dto.countType === InventoryCountType.RACK && dto.rackIds?.length) {
-      locationWhere.rackId = { in: dto.rackIds };
+      locationParams.push(dto.rackIds);
+      locationConditions.push(`il."rackId" = ANY($${locationParams.length})`);
     }
 
-    const locations = await this.prisma.inventoryLocation.findMany({
-      where: locationWhere,
-      include: { product: { select: { costPrice: true } } },
-    });
+    const locations = await this.db.query<any>(`
+      SELECT il.*, p."costPrice"
+      FROM inventory_locations il
+      JOIN products p ON p.id = il."productId"
+      WHERE ${locationConditions.join(' AND ')}
+    `, locationParams);
 
-    const count = await this.prisma.inventoryCount.create({
-      data: {
-        countNumber,
-        warehouseId: dto.warehouseId,
-        countType: dto.countType,
-        status: InventoryCountStatus.DRAFT,
-        countDate: new Date(dto.countDate),
-        dueDate: dto.dueDate ? new Date(dto.dueDate) : null,
-        createdById: userId,
-        notes: dto.notes,
-        items: {
-          create: locations.map((loc) => ({
-            productId: loc.productId,
-            batchId: loc.batchId,
-            rackId: loc.rackId,
-            systemQty: loc.quantity,
-          })),
-        },
-      },
-      include: COUNT_INCLUDE,
-    });
+    const countId = uuidv4();
+    const now = new Date();
+
+    await this.db.query(`
+      INSERT INTO inventory_counts (
+        id, "countNumber", "warehouseId", "countType", status, "countDate", "dueDate",
+        "createdById", "totalVarianceValue", notes, "createdAt", "updatedAt"
+      ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,0,$9,$10,$10)
+    `, [
+      countId, countNumber, dto.warehouseId, dto.countType, InventoryCountStatus.DRAFT,
+      new Date(dto.countDate), dto.dueDate ? new Date(dto.dueDate) : null,
+      userId, dto.notes ?? null, now,
+    ]);
+
+    for (const loc of locations) {
+      await this.db.query(`
+        INSERT INTO inventory_count_items (id, "inventoryCountId", "productId", "batchId", "rackId", "systemQty")
+        VALUES ($1, $2, $3, $4, $5, $6)
+      `, [uuidv4(), countId, loc.productId, loc.batchId, loc.rackId, loc.quantity]);
+    }
 
     await this.auditService.log({
-      entityType: 'InventoryCount',
-      entityId: count.id,
-      action: 'CREATE',
-      newValue: { countNumber, status: count.status, countType: count.countType },
+      entityType: 'InventoryCount', entityId: countId, action: 'CREATE',
+      newValue: { countNumber, status: InventoryCountStatus.DRAFT, countType: dto.countType },
       performedById: userId,
     });
 
-    return count;
+    return this.findOne(countId);
   }
 
   async start(id: string, userId: string) {
     const count = await this.findOne(id);
     this.assertStatus(count.status, [InventoryCountStatus.DRAFT, InventoryCountStatus.RECOUNT]);
 
-    const updated = await this.prisma.inventoryCount.update({
-      where: { id },
-      data: {
-        status: InventoryCountStatus.IN_PROGRESS,
-        startedAt: new Date(),
-      },
-      include: COUNT_INCLUDE,
-    });
+    await this.db.query(`
+      UPDATE inventory_counts SET status = $1, "startedAt" = NOW(), "updatedAt" = NOW() WHERE id = $2
+    `, [InventoryCountStatus.IN_PROGRESS, id]);
 
     await this.auditService.log({
-      entityType: 'InventoryCount',
-      entityId: id,
-      action: 'START',
-      oldValue: { status: count.status },
-      newValue: { status: InventoryCountStatus.IN_PROGRESS },
+      entityType: 'InventoryCount', entityId: id, action: 'START',
+      oldValue: { status: count.status }, newValue: { status: InventoryCountStatus.IN_PROGRESS },
       performedById: userId,
     });
 
-    return updated;
+    return this.findOne(id);
   }
 
   async submit(id: string, userId: string) {
     const count = await this.findOne(id);
     this.assertStatus(count.status, [InventoryCountStatus.IN_PROGRESS]);
 
-    const [updated] = await this.prisma.$transaction([
-      this.prisma.inventoryCount.update({
-        where: { id },
-        data: {
-          status: InventoryCountStatus.SUBMITTED,
-          submittedById: userId,
-          submittedAt: new Date(),
-        },
-        include: COUNT_INCLUDE,
-      }),
-      this.prisma.approval.create({
-        data: {
-          inventoryCountId: id,
-          action: ApprovalAction.SUBMIT,
-          performedById: userId,
-        },
-      }),
-    ]);
+    await this.db.transaction(async (client) => {
+      await client.query(`
+        UPDATE inventory_counts
+        SET status = $1, "submittedById" = $2, "submittedAt" = NOW(), "updatedAt" = NOW()
+        WHERE id = $3
+      `, [InventoryCountStatus.SUBMITTED, userId, id]);
+
+      await client.query(`
+        INSERT INTO approvals (id, "inventoryCountId", action, "performedById", "createdAt")
+        VALUES ($1, $2, $3, $4, NOW())
+      `, [uuidv4(), id, ApprovalAction.SUBMIT, userId]);
+    });
 
     await this.auditService.log({
-      entityType: 'InventoryCount',
-      entityId: id,
-      action: 'SUBMIT',
-      oldValue: { status: count.status },
-      newValue: { status: InventoryCountStatus.SUBMITTED },
+      entityType: 'InventoryCount', entityId: id, action: 'SUBMIT',
+      oldValue: { status: count.status }, newValue: { status: InventoryCountStatus.SUBMITTED },
       performedById: userId,
     });
 
-    return updated;
+    return this.findOne(id);
   }
 
   async approve(id: string, userId: string, remarks?: string) {
     const count = await this.findOne(id);
     this.assertStatus(count.status, [InventoryCountStatus.SUBMITTED]);
 
-    // Update inventory locations with physical counts
     await this.applyPhysicalCounts(count);
 
-    // Recalculate total variance
-    const totalVariance = count.items.reduce((sum, item) => {
+    const totalVariance = (count.items as any[]).reduce((sum: number, item: any) => {
       return sum + (Number(item.varianceValue) || 0);
     }, 0);
 
-    const [updated] = await this.prisma.$transaction([
-      this.prisma.inventoryCount.update({
-        where: { id },
-        data: {
-          status: InventoryCountStatus.APPROVED,
-          approvedById: userId,
-          approvedAt: new Date(),
-          totalVarianceValue: totalVariance,
-        },
-        include: COUNT_INCLUDE,
-      }),
-      this.prisma.approval.create({
-        data: {
-          inventoryCountId: id,
-          action: ApprovalAction.APPROVE,
-          remarks,
-          performedById: userId,
-        },
-      }),
-    ]);
+    await this.db.transaction(async (client) => {
+      await client.query(`
+        UPDATE inventory_counts
+        SET status = $1, "approvedById" = $2, "approvedAt" = NOW(), "totalVarianceValue" = $3, "updatedAt" = NOW()
+        WHERE id = $4
+      `, [InventoryCountStatus.APPROVED, userId, totalVariance, id]);
+
+      await client.query(`
+        INSERT INTO approvals (id, "inventoryCountId", action, remarks, "performedById", "createdAt")
+        VALUES ($1, $2, $3, $4, $5, NOW())
+      `, [uuidv4(), id, ApprovalAction.APPROVE, remarks ?? null, userId]);
+    });
 
     await this.auditService.log({
-      entityType: 'InventoryCount',
-      entityId: id,
-      action: 'APPROVE',
-      oldValue: { status: count.status },
-      newValue: { status: InventoryCountStatus.APPROVED, totalVarianceValue: totalVariance },
+      entityType: 'InventoryCount', entityId: id, action: 'APPROVE',
+      oldValue: { status: count.status }, newValue: { status: InventoryCountStatus.APPROVED, totalVarianceValue: totalVariance },
       performedById: userId,
     });
 
-    return updated;
+    return this.findOne(id);
   }
 
   async reject(id: string, userId: string, remarks?: string) {
     const count = await this.findOne(id);
     this.assertStatus(count.status, [InventoryCountStatus.SUBMITTED]);
 
-    const [updated] = await this.prisma.$transaction([
-      this.prisma.inventoryCount.update({
-        where: { id },
-        data: { status: InventoryCountStatus.REJECTED },
-        include: COUNT_INCLUDE,
-      }),
-      this.prisma.approval.create({
-        data: {
-          inventoryCountId: id,
-          action: ApprovalAction.REJECT,
-          remarks,
-          performedById: userId,
-        },
-      }),
-    ]);
+    await this.db.transaction(async (client) => {
+      await client.query(`UPDATE inventory_counts SET status = $1, "updatedAt" = NOW() WHERE id = $2`, [InventoryCountStatus.REJECTED, id]);
+      await client.query(`
+        INSERT INTO approvals (id, "inventoryCountId", action, remarks, "performedById", "createdAt")
+        VALUES ($1, $2, $3, $4, $5, NOW())
+      `, [uuidv4(), id, ApprovalAction.REJECT, remarks ?? null, userId]);
+    });
 
     await this.auditService.log({
-      entityType: 'InventoryCount',
-      entityId: id,
-      action: 'REJECT',
-      oldValue: { status: count.status },
-      newValue: { status: InventoryCountStatus.REJECTED },
+      entityType: 'InventoryCount', entityId: id, action: 'REJECT',
+      oldValue: { status: count.status }, newValue: { status: InventoryCountStatus.REJECTED },
       performedById: userId,
     });
 
-    return updated;
+    return this.findOne(id);
   }
 
   async requestRecount(id: string, userId: string, remarks?: string) {
     const count = await this.findOne(id);
     this.assertStatus(count.status, [InventoryCountStatus.SUBMITTED]);
 
-    const [updated] = await this.prisma.$transaction([
-      this.prisma.inventoryCount.update({
-        where: { id },
-        data: { status: InventoryCountStatus.RECOUNT },
-        include: COUNT_INCLUDE,
-      }),
-      this.prisma.approval.create({
-        data: {
-          inventoryCountId: id,
-          action: ApprovalAction.RECOUNT,
-          remarks,
-          performedById: userId,
-        },
-      }),
-    ]);
+    await this.db.transaction(async (client) => {
+      await client.query(`UPDATE inventory_counts SET status = $1, "updatedAt" = NOW() WHERE id = $2`, [InventoryCountStatus.RECOUNT, id]);
+      await client.query(`
+        INSERT INTO approvals (id, "inventoryCountId", action, remarks, "performedById", "createdAt")
+        VALUES ($1, $2, $3, $4, $5, NOW())
+      `, [uuidv4(), id, ApprovalAction.RECOUNT, remarks ?? null, userId]);
+    });
 
     await this.auditService.log({
-      entityType: 'InventoryCount',
-      entityId: id,
-      action: 'RECOUNT',
-      oldValue: { status: count.status },
-      newValue: { status: InventoryCountStatus.RECOUNT },
+      entityType: 'InventoryCount', entityId: id, action: 'RECOUNT',
+      oldValue: { status: count.status }, newValue: { status: InventoryCountStatus.RECOUNT },
       performedById: userId,
     });
 
-    return updated;
+    return this.findOne(id);
   }
 
   private async applyPhysicalCounts(count: any) {
     for (const item of count.items) {
       if (item.physicalQty === null) continue;
 
-      const existing = await this.prisma.inventoryLocation.findFirst({
-        where: {
-          warehouseId: count.warehouseId,
-          rackId: item.rackId ?? null,
-          productId: item.productId,
-          batchId: item.batchId ?? null,
-        },
-      });
+      const existing = await this.db.queryOne<any>(`
+        SELECT id FROM inventory_locations
+        WHERE "warehouseId" = $1
+          AND ("rackId" = $2 OR ($2 IS NULL AND "rackId" IS NULL))
+          AND "productId" = $3
+          AND ("batchId" = $4 OR ($4 IS NULL AND "batchId" IS NULL))
+      `, [count.warehouseId, item.rackId ?? null, item.productId, item.batchId ?? null]);
 
       if (existing) {
-        await this.prisma.inventoryLocation.update({
-          where: { id: existing.id },
-          data: { quantity: item.physicalQty },
-        });
+        await this.db.query(`UPDATE inventory_locations SET quantity = $1 WHERE id = $2`, [item.physicalQty, existing.id]);
       } else {
-        await this.prisma.inventoryLocation.create({
-          data: {
-            warehouseId: count.warehouseId,
-            rackId: item.rackId ?? null,
-            productId: item.productId,
-            batchId: item.batchId ?? null,
-            quantity: item.physicalQty,
-          },
-        });
+        await this.db.query(`
+          INSERT INTO inventory_locations (id, "warehouseId", "rackId", "productId", "batchId", quantity)
+          VALUES ($1, $2, $3, $4, $5, $6)
+        `, [uuidv4(), count.warehouseId, item.rackId ?? null, item.productId, item.batchId ?? null, item.physicalQty]);
       }
     }
   }
 
-  private assertStatus(current: InventoryCountStatus, allowed: InventoryCountStatus[]) {
-    if (!allowed.includes(current)) {
+  private assertStatus(current: string, allowed: InventoryCountStatus[]) {
+    if (!allowed.includes(current as InventoryCountStatus)) {
       throw new BadRequestException(
         `Cannot perform this action on a count with status '${current}'. Allowed: ${allowed.join(', ')}`,
       );
@@ -345,11 +300,12 @@ export class InventoryCountsService {
     const d = String(now.getDate()).padStart(2, '0');
 
     const todayStart = new Date(y, now.getMonth(), now.getDate());
-    const todayCount = await this.prisma.inventoryCount.count({
-      where: { createdAt: { gte: todayStart } },
-    });
+    const [{ count }] = await this.db.query<{ count: string }>(
+      `SELECT COUNT(*)::int AS count FROM inventory_counts WHERE "createdAt" >= $1`,
+      [todayStart],
+    );
 
-    const seq = String(todayCount + 1).padStart(4, '0');
+    const seq = String(Number(count) + 1).padStart(4, '0');
     return `CNT-${y}${m}${d}-${seq}`;
   }
 }

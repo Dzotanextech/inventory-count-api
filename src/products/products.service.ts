@@ -1,109 +1,118 @@
 import { Injectable, NotFoundException, ConflictException, BadRequestException } from '@nestjs/common';
-import { PrismaService } from '../prisma/prisma.service';
+import { DatabaseService } from '../database/database.service';
 import { CreateProductDto } from './dto/create-product.dto';
 import { UpdateProductDto } from './dto/update-product.dto';
 import { PaginationDto, paginate } from '../common/dto/pagination.dto';
+import { v4 as uuidv4 } from 'uuid';
+
+const PRODUCT_SQL = `
+  SELECT p.*,
+    json_build_object('id', c.id, 'name', c.name) AS category
+  FROM products p
+  JOIN categories c ON c.id = p."categoryId"
+`;
 
 @Injectable()
 export class ProductsService {
-  constructor(private prisma: PrismaService) {}
+  constructor(private db: DatabaseService) {}
 
   async findAll(query: PaginationDto & { categoryId?: string }) {
-    const where: any = {};
-    if (query.categoryId) where.categoryId = query.categoryId;
+    const params: any[] = [];
+    const conditions: string[] = [];
+
+    if (query.categoryId) { params.push(query.categoryId); conditions.push(`p."categoryId" = $${params.length}`); }
     if (query.search) {
-      where.OR = [
-        { name: { contains: query.search, mode: 'insensitive' } },
-        { sku: { contains: query.search, mode: 'insensitive' } },
-        { barcode: { contains: query.search, mode: 'insensitive' } },
-      ];
+      params.push(`%${query.search}%`);
+      conditions.push(`(p.name ILIKE $${params.length} OR p.sku ILIKE $${params.length} OR p.barcode ILIKE $${params.length})`);
     }
 
-    const [data, total] = await Promise.all([
-      this.prisma.product.findMany({
-        where,
-        skip: query.skip,
-        take: query.limit,
-        orderBy: { name: 'asc' },
-        include: { category: { select: { id: true, name: true } } },
-      }),
-      this.prisma.product.count({ where }),
-    ]);
+    const where = conditions.length ? `WHERE ${conditions.join(' AND ')}` : '';
+    params.push(query.limit, query.skip);
+    const limitIdx = params.length - 1;
+    const offsetIdx = params.length;
 
-    return paginate(data, total, query.page, query.limit);
+    const data = await this.db.query(`${PRODUCT_SQL} ${where} ORDER BY p.name ASC LIMIT $${limitIdx} OFFSET $${offsetIdx}`, params);
+
+    const countParams = params.slice(0, params.length - 2);
+    const [{ count }] = await this.db.query<{ count: string }>(
+      `SELECT COUNT(*)::int AS count FROM products p ${where}`,
+      countParams,
+    );
+
+    return paginate(data, Number(count), query.page, query.limit);
   }
 
   async findOne(id: string) {
-    const product = await this.prisma.product.findUnique({
-      where: { id },
-      include: {
-        category: { select: { id: true, name: true } },
-        batches: true,
-      },
-    });
+    const product = await this.db.queryOne<any>(`${PRODUCT_SQL} WHERE p.id = $1`, [id]);
     if (!product) throw new NotFoundException(`Product ${id} not found`);
-    return product;
+
+    const batches = await this.db.query(`SELECT * FROM batches WHERE "productId" = $1`, [id]);
+    return { ...product, batches };
   }
 
   async findByBarcode(barcode: string) {
-    const product = await this.prisma.product.findUnique({
-      where: { barcode },
-      include: {
-        category: { select: { id: true, name: true } },
-        batches: true,
-      },
-    });
+    const product = await this.db.queryOne<any>(`${PRODUCT_SQL} WHERE p.barcode = $1`, [barcode]);
     if (!product) throw new NotFoundException(`Product with barcode '${barcode}' not found`);
-    return product;
+
+    const batches = await this.db.query(`SELECT * FROM batches WHERE "productId" = $1`, [product.id]);
+    return { ...product, batches };
   }
 
   async create(dto: CreateProductDto) {
-    const skuExists = await this.prisma.product.findUnique({ where: { sku: dto.sku } });
+    const skuExists = await this.db.queryOne(`SELECT id FROM products WHERE sku = $1`, [dto.sku]);
     if (skuExists) throw new ConflictException(`SKU '${dto.sku}' already exists`);
 
-    const barcodeExists = await this.prisma.product.findUnique({ where: { barcode: dto.barcode } });
+    const barcodeExists = await this.db.queryOne(`SELECT id FROM products WHERE barcode = $1`, [dto.barcode]);
     if (barcodeExists) throw new ConflictException(`Barcode '${dto.barcode}' already exists`);
 
-    return this.prisma.product.create({
-      data: {
-        categoryId: dto.categoryId,
-        sku: dto.sku,
-        barcode: dto.barcode,
-        name: dto.name,
-        description: dto.description,
-        uom: dto.uom,
-        costPrice: dto.costPrice,
-        sellingPrice: dto.sellingPrice,
-        isBatchTracked: dto.isBatchTracked ?? false,
-      },
-      include: { category: { select: { id: true, name: true } } },
-    });
+    const [row] = await this.db.query(`
+      INSERT INTO products (id, "categoryId", sku, barcode, name, description, uom, "costPrice", "sellingPrice", "isBatchTracked")
+      VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10) RETURNING *
+    `, [uuidv4(), dto.categoryId, dto.sku, dto.barcode, dto.name, dto.description ?? null,
+        dto.uom, dto.costPrice, dto.sellingPrice, dto.isBatchTracked ?? false]);
+
+    return this.findOne(row.id);
   }
 
   async update(id: string, dto: UpdateProductDto) {
     await this.findOne(id);
 
     if (dto.sku) {
-      const dup = await this.prisma.product.findFirst({ where: { sku: dto.sku, NOT: { id } } });
+      const dup = await this.db.queryOne(`SELECT id FROM products WHERE sku = $1 AND id != $2`, [dto.sku, id]);
       if (dup) throw new ConflictException(`SKU '${dto.sku}' already in use`);
     }
-
     if (dto.barcode) {
-      const dup = await this.prisma.product.findFirst({ where: { barcode: dto.barcode, NOT: { id } } });
+      const dup = await this.db.queryOne(`SELECT id FROM products WHERE barcode = $1 AND id != $2`, [dto.barcode, id]);
       if (dup) throw new ConflictException(`Barcode '${dto.barcode}' already in use`);
     }
 
-    return this.prisma.product.update({
-      where: { id },
-      data: dto,
-      include: { category: { select: { id: true, name: true } } },
-    });
+    const fields: string[] = [];
+    const params: any[] = [];
+    const map: Record<string, string> = {
+      categoryId: '"categoryId"', sku: 'sku', barcode: 'barcode', name: 'name',
+      description: 'description', uom: 'uom', costPrice: '"costPrice"',
+      sellingPrice: '"sellingPrice"', isBatchTracked: '"isBatchTracked"',
+    };
+
+    for (const [key, col] of Object.entries(map)) {
+      if ((dto as any)[key] !== undefined) {
+        params.push((dto as any)[key]);
+        fields.push(`${col} = $${params.length}`);
+      }
+    }
+
+    if (fields.length === 0) return this.findOne(id);
+
+    params.push(id);
+    await this.db.query(`UPDATE products SET ${fields.join(', ')} WHERE id = $${params.length}`, params);
+    return this.findOne(id);
   }
 
   async remove(id: string) {
     await this.findOne(id);
     try {
-      return await this.prisma.product.delete({ where: { id } });
+      const [row] = await this.db.query(`DELETE FROM products WHERE id = $1 RETURNING *`, [id]);
+      return row;
     } catch {
       throw new BadRequestException('Cannot delete product — it has linked batches or inventory records. Remove those first.');
     }

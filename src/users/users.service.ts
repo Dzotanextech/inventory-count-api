@@ -1,115 +1,122 @@
-import {
-  Injectable,
-  NotFoundException,
-  ConflictException,
-} from '@nestjs/common';
-import { PrismaService } from '../prisma/prisma.service';
+import { Injectable, NotFoundException, ConflictException } from '@nestjs/common';
+import { DatabaseService } from '../database/database.service';
 import { CreateUserDto } from './dto/create-user.dto';
 import { UpdateUserDto } from './dto/update-user.dto';
 import { PaginationDto, paginate } from '../common/dto/pagination.dto';
 import * as bcrypt from 'bcryptjs';
+import { v4 as uuidv4 } from 'uuid';
 
-const USER_SELECT = {
-  id: true,
-  name: true,
-  email: true,
-  isActive: true,
-  createdAt: true,
-  updatedAt: true,
-  role: { select: { id: true, name: true } },
-};
+const USER_COLS = `
+  u.id, u.name, u.email, u."isActive", u."createdAt", u."updatedAt",
+  json_build_object('id', r.id, 'name', r.name) AS role
+`;
 
 @Injectable()
 export class UsersService {
-  constructor(private prisma: PrismaService) {}
+  constructor(private db: DatabaseService) {}
 
   async findAll(query: PaginationDto) {
-    const where = query.search
-      ? {
-          OR: [
-            { name: { contains: query.search, mode: 'insensitive' as const } },
-            { email: { contains: query.search, mode: 'insensitive' as const } },
-          ],
-        }
-      : {};
+    const params: any[] = [];
+    let where = '';
 
-    const [data, total] = await Promise.all([
-      this.prisma.user.findMany({
-        where,
-        select: USER_SELECT,
-        skip: query.skip,
-        take: query.limit,
-        orderBy: { createdAt: 'desc' },
-      }),
-      this.prisma.user.count({ where }),
-    ]);
+    if (query.search) {
+      params.push(`%${query.search}%`);
+      where = `WHERE u.name ILIKE $1 OR u.email ILIKE $1`;
+    }
 
-    return paginate(data, total, query.page, query.limit);
+    params.push(query.limit, query.skip);
+    const limitIdx = params.length - 1;
+    const offsetIdx = params.length;
+
+    const data = await this.db.query(`
+      SELECT ${USER_COLS}
+      FROM users u JOIN roles r ON r.id = u."roleId"
+      ${where}
+      ORDER BY u."createdAt" DESC
+      LIMIT $${limitIdx} OFFSET $${offsetIdx}
+    `, params);
+
+    const countParams = query.search ? [`%${query.search}%`] : [];
+    const countWhere = query.search ? `WHERE name ILIKE $1 OR email ILIKE $1` : '';
+    const [{ count }] = await this.db.query<{ count: string }>(
+      `SELECT COUNT(*)::int AS count FROM users ${countWhere}`,
+      countParams,
+    );
+
+    return paginate(data, Number(count), query.page, query.limit);
   }
 
   async findOne(id: string) {
-    const user = await this.prisma.user.findUnique({
-      where: { id },
-      select: USER_SELECT,
-    });
+    const user = await this.db.queryOne(`
+      SELECT ${USER_COLS}
+      FROM users u JOIN roles r ON r.id = u."roleId"
+      WHERE u.id = $1
+    `, [id]);
     if (!user) throw new NotFoundException(`User ${id} not found`);
     return user;
   }
 
   async create(dto: CreateUserDto) {
-    const exists = await this.prisma.user.findUnique({ where: { email: dto.email } });
+    const exists = await this.db.queryOne(`SELECT id FROM users WHERE email = $1`, [dto.email]);
     if (exists) throw new ConflictException('Email already registered');
 
     const passwordHash = await bcrypt.hash(dto.password, 12);
+    const id = uuidv4();
+    const now = new Date();
 
-    return this.prisma.user.create({
-      data: {
-        name: dto.name,
-        email: dto.email,
-        passwordHash,
-        roleId: dto.roleId,
-        isActive: dto.isActive ?? true,
-      },
-      select: USER_SELECT,
-    });
+    await this.db.query(`
+      INSERT INTO users (id, name, email, password_hash, "roleId", "isActive", "createdAt", "updatedAt")
+      VALUES ($1, $2, $3, $4, $5, $6, $7, $7)
+    `, [id, dto.name, dto.email, passwordHash, dto.roleId, dto.isActive ?? true, now]);
+
+    return this.findOne(id);
   }
 
   async update(id: string, dto: UpdateUserDto) {
     await this.findOne(id);
 
     if (dto.email) {
-      const exists = await this.prisma.user.findFirst({
-        where: { email: dto.email, NOT: { id } },
-      });
+      const exists = await this.db.queryOne(
+        `SELECT id FROM users WHERE email = $1 AND id != $2`,
+        [dto.email, id],
+      );
       if (exists) throw new ConflictException('Email already in use');
     }
 
-    const data: any = { ...dto };
-    delete data.password;
+    const fields: string[] = ['"updatedAt" = NOW()'];
+    const params: any[] = [];
 
+    if (dto.name) { params.push(dto.name); fields.push(`name = $${params.length}`); }
+    if (dto.email) { params.push(dto.email); fields.push(`email = $${params.length}`); }
+    if (dto.roleId) { params.push(dto.roleId); fields.push(`"roleId" = $${params.length}`); }
+    if (dto.isActive !== undefined) { params.push(dto.isActive); fields.push(`"isActive" = $${params.length}`); }
     if (dto.password) {
-      data.passwordHash = await bcrypt.hash(dto.password, 12);
+      const hash = await bcrypt.hash(dto.password, 12);
+      params.push(hash);
+      fields.push(`password_hash = $${params.length}`);
     }
 
-    return this.prisma.user.update({
-      where: { id },
-      data,
-      select: USER_SELECT,
-    });
+    params.push(id);
+    await this.db.query(
+      `UPDATE users SET ${fields.join(', ')} WHERE id = $${params.length}`,
+      params,
+    );
+
+    return this.findOne(id);
   }
 
   async remove(id: string) {
     await this.findOne(id);
-    await this.prisma.user.delete({ where: { id } });
+    await this.db.query(`DELETE FROM users WHERE id = $1`, [id]);
     return { message: 'User deleted successfully' };
   }
 
   async toggleActive(id: string) {
-    const user = await this.findOne(id);
-    return this.prisma.user.update({
-      where: { id },
-      data: { isActive: !user.isActive },
-      select: USER_SELECT,
-    });
+    const user = await this.findOne(id) as any;
+    await this.db.query(
+      `UPDATE users SET "isActive" = $1, "updatedAt" = NOW() WHERE id = $2`,
+      [!user.isActive, id],
+    );
+    return this.findOne(id);
   }
 }

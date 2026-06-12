@@ -1,105 +1,105 @@
-import { Injectable, NotFoundException, ConflictException } from '@nestjs/common';
-import { PrismaService } from '../prisma/prisma.service';
+import { Injectable, NotFoundException } from '@nestjs/common';
+import { DatabaseService } from '../database/database.service';
 import { CreateInventoryLocationDto } from './dto/create-inventory-location.dto';
 import { UpdateInventoryLocationDto } from './dto/update-inventory-location.dto';
 import { PaginationDto, paginate } from '../common/dto/pagination.dto';
+import { v4 as uuidv4 } from 'uuid';
 
-const LOCATION_INCLUDE = {
-  warehouse: { select: { id: true, code: true, name: true } },
-  rack: { select: { id: true, rackCode: true, barcode: true } },
-  product: { select: { id: true, sku: true, name: true, uom: true } },
-  batch: { select: { id: true, batchNumber: true, expiryDate: true } },
-};
+const LOCATION_SQL = `
+  SELECT il.*,
+    json_build_object('id', w.id, 'code', w.code, 'name', w.name) AS warehouse,
+    CASE WHEN r.id IS NOT NULL THEN json_build_object('id', r.id, 'rackCode', r."rackCode", 'barcode', r.barcode) END AS rack,
+    json_build_object('id', p.id, 'sku', p.sku, 'name', p.name, 'uom', p.uom) AS product,
+    CASE WHEN b.id IS NOT NULL THEN json_build_object('id', b.id, 'batchNumber', b."batchNumber", 'expiryDate', b."expiryDate") END AS batch
+  FROM inventory_locations il
+  JOIN warehouses w ON w.id = il."warehouseId"
+  LEFT JOIN racks r ON r.id = il."rackId"
+  JOIN products p ON p.id = il."productId"
+  LEFT JOIN batches b ON b.id = il."batchId"
+`;
 
 @Injectable()
 export class InventoryLocationsService {
-  constructor(private prisma: PrismaService) {}
+  constructor(private db: DatabaseService) {}
 
-  async findAll(
-    query: PaginationDto & { warehouseId?: string; productId?: string; rackId?: string },
-  ) {
-    const where: any = {};
-    if (query.warehouseId) where.warehouseId = query.warehouseId;
-    if (query.productId) where.productId = query.productId;
-    if (query.rackId) where.rackId = query.rackId;
+  async findAll(query: PaginationDto & { warehouseId?: string; productId?: string; rackId?: string }) {
+    const params: any[] = [];
+    const conditions: string[] = [];
 
-    const [data, total] = await Promise.all([
-      this.prisma.inventoryLocation.findMany({
-        where,
-        skip: query.skip,
-        take: query.limit,
-        orderBy: { product: { name: 'asc' } },
-        include: LOCATION_INCLUDE,
-      }),
-      this.prisma.inventoryLocation.count({ where }),
-    ]);
+    if (query.warehouseId) { params.push(query.warehouseId); conditions.push(`il."warehouseId" = $${params.length}`); }
+    if (query.productId) { params.push(query.productId); conditions.push(`il."productId" = $${params.length}`); }
+    if (query.rackId) { params.push(query.rackId); conditions.push(`il."rackId" = $${params.length}`); }
 
-    return paginate(data, total, query.page, query.limit);
+    const where = conditions.length ? `WHERE ${conditions.join(' AND ')}` : '';
+    params.push(query.limit, query.skip);
+    const limitIdx = params.length - 1;
+    const offsetIdx = params.length;
+
+    const data = await this.db.query(
+      `${LOCATION_SQL} ${where} ORDER BY p.name ASC LIMIT $${limitIdx} OFFSET $${offsetIdx}`,
+      params,
+    );
+
+    const countParams = params.slice(0, params.length - 2);
+    const [{ count }] = await this.db.query<{ count: string }>(
+      `SELECT COUNT(*)::int AS count FROM inventory_locations il ${where}`,
+      countParams,
+    );
+
+    return paginate(data, Number(count), query.page, query.limit);
   }
 
   async findOne(id: string) {
-    const loc = await this.prisma.inventoryLocation.findUnique({
-      where: { id },
-      include: LOCATION_INCLUDE,
-    });
+    const loc = await this.db.queryOne(`${LOCATION_SQL} WHERE il.id = $1`, [id]);
     if (!loc) throw new NotFoundException(`Inventory location ${id} not found`);
     return loc;
   }
 
   async upsert(dto: CreateInventoryLocationDto) {
-    const existing = await this.prisma.inventoryLocation.findFirst({
-      where: {
-        warehouseId: dto.warehouseId,
-        rackId: dto.rackId ?? null,
-        productId: dto.productId,
-        batchId: dto.batchId ?? null,
-      },
-    });
+    const existing = await this.db.queryOne<any>(`
+      SELECT id FROM inventory_locations
+      WHERE "warehouseId" = $1
+        AND ("rackId" = $2 OR ($2 IS NULL AND "rackId" IS NULL))
+        AND "productId" = $3
+        AND ("batchId" = $4 OR ($4 IS NULL AND "batchId" IS NULL))
+    `, [dto.warehouseId, dto.rackId ?? null, dto.productId, dto.batchId ?? null]);
 
     if (existing) {
-      return this.prisma.inventoryLocation.update({
-        where: { id: existing.id },
-        data: { quantity: dto.quantity },
-        include: LOCATION_INCLUDE,
-      });
+      await this.db.query(`UPDATE inventory_locations SET quantity = $1 WHERE id = $2`, [dto.quantity, existing.id]);
+      return this.findOne(existing.id);
     }
 
-    return this.prisma.inventoryLocation.create({
-      data: {
-        warehouseId: dto.warehouseId,
-        rackId: dto.rackId ?? null,
-        productId: dto.productId,
-        batchId: dto.batchId ?? null,
-        quantity: dto.quantity,
-      },
-      include: LOCATION_INCLUDE,
-    });
+    const [row] = await this.db.query(`
+      INSERT INTO inventory_locations (id, "warehouseId", "rackId", "productId", "batchId", quantity)
+      VALUES ($1, $2, $3, $4, $5, $6) RETURNING *
+    `, [uuidv4(), dto.warehouseId, dto.rackId ?? null, dto.productId, dto.batchId ?? null, dto.quantity]);
+
+    return this.findOne(row.id);
   }
 
   async update(id: string, dto: UpdateInventoryLocationDto) {
     await this.findOne(id);
-    return this.prisma.inventoryLocation.update({
-      where: { id },
-      data: { quantity: dto.quantity },
-      include: LOCATION_INCLUDE,
-    });
+    await this.db.query(`UPDATE inventory_locations SET quantity = $1 WHERE id = $2`, [dto.quantity, id]);
+    return this.findOne(id);
   }
 
   async remove(id: string) {
     await this.findOne(id);
-    return this.prisma.inventoryLocation.delete({ where: { id } });
+    const [row] = await this.db.query(`DELETE FROM inventory_locations WHERE id = $1 RETURNING *`, [id]);
+    return row;
   }
 
   async getStockSummary(warehouseId: string) {
-    const locations = await this.prisma.inventoryLocation.findMany({
-      where: { warehouseId },
-      include: {
-        product: { select: { id: true, sku: true, name: true, uom: true, costPrice: true } },
-        batch: { select: { id: true, batchNumber: true, expiryDate: true } },
-        rack: { select: { id: true, rackCode: true } },
-      },
-    });
-
-    return locations;
+    return this.db.query(`
+      SELECT il.*,
+        json_build_object('id', p.id, 'sku', p.sku, 'name', p.name, 'uom', p.uom, 'costPrice', p."costPrice") AS product,
+        CASE WHEN b.id IS NOT NULL THEN json_build_object('id', b.id, 'batchNumber', b."batchNumber", 'expiryDate', b."expiryDate") END AS batch,
+        CASE WHEN r.id IS NOT NULL THEN json_build_object('id', r.id, 'rackCode', r."rackCode") END AS rack
+      FROM inventory_locations il
+      JOIN products p ON p.id = il."productId"
+      LEFT JOIN batches b ON b.id = il."batchId"
+      LEFT JOIN racks r ON r.id = il."rackId"
+      WHERE il."warehouseId" = $1
+    `, [warehouseId]);
   }
 }

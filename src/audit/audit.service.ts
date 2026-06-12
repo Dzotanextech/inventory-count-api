@@ -1,6 +1,7 @@
 import { Injectable } from '@nestjs/common';
-import { PrismaService } from '../prisma/prisma.service';
+import { DatabaseService } from '../database/database.service';
 import { PaginationDto, paginate } from '../common/dto/pagination.dto';
+import { v4 as uuidv4 } from 'uuid';
 
 interface LogParams {
   entityType: string;
@@ -13,45 +14,60 @@ interface LogParams {
 
 @Injectable()
 export class AuditService {
-  constructor(private prisma: PrismaService) {}
+  constructor(private db: DatabaseService) {}
 
   async log(params: LogParams) {
-    return this.prisma.auditLog.create({
-      data: {
-        entityType: params.entityType,
-        entityId: params.entityId,
-        action: params.action,
-        oldValue: params.oldValue ?? undefined,
-        newValue: params.newValue ?? undefined,
-        performedById: params.performedById,
-      },
-    });
+    const [row] = await this.db.query(`
+      INSERT INTO audit_logs (id, "entityType", "entityId", action, "oldValue", "newValue", "performedById", "createdAt")
+      VALUES ($1, $2, $3, $4, $5, $6, $7, NOW()) RETURNING *
+    `, [
+      uuidv4(), params.entityType, params.entityId, params.action,
+      params.oldValue ? JSON.stringify(params.oldValue) : null,
+      params.newValue ? JSON.stringify(params.newValue) : null,
+      params.performedById,
+    ]);
+    return row;
   }
 
   async findAll(query: PaginationDto & { entityType?: string; entityId?: string }) {
-    const where: any = {};
-    if (query.entityType) where.entityType = query.entityType;
-    if (query.entityId) where.entityId = query.entityId;
+    const params: any[] = [];
+    const conditions: string[] = [];
 
-    const [data, total] = await Promise.all([
-      this.prisma.auditLog.findMany({
-        where,
-        skip: query.skip,
-        take: query.limit,
-        orderBy: { createdAt: 'desc' },
-        include: { performedBy: { select: { id: true, name: true, email: true } } },
-      }),
-      this.prisma.auditLog.count({ where }),
-    ]);
+    if (query.entityType) { params.push(query.entityType); conditions.push(`al."entityType" = $${params.length}`); }
+    if (query.entityId) { params.push(query.entityId); conditions.push(`al."entityId" = $${params.length}`); }
 
-    return paginate(data, total, query.page, query.limit);
+    const where = conditions.length ? `WHERE ${conditions.join(' AND ')}` : '';
+    params.push(query.limit, query.skip);
+    const limitIdx = params.length - 1;
+    const offsetIdx = params.length;
+
+    const data = await this.db.query(`
+      SELECT al.*,
+        json_build_object('id', u.id, 'name', u.name, 'email', u.email) AS "performedBy"
+      FROM audit_logs al
+      JOIN users u ON u.id = al."performedById"
+      ${where}
+      ORDER BY al."createdAt" DESC
+      LIMIT $${limitIdx} OFFSET $${offsetIdx}
+    `, params);
+
+    const countParams = params.slice(0, params.length - 2);
+    const [{ count }] = await this.db.query<{ count: string }>(
+      `SELECT COUNT(*)::int AS count FROM audit_logs al ${where}`,
+      countParams,
+    );
+
+    return paginate(data, Number(count), query.page, query.limit);
   }
 
   async findForEntity(entityType: string, entityId: string) {
-    return this.prisma.auditLog.findMany({
-      where: { entityType, entityId },
-      orderBy: { createdAt: 'asc' },
-      include: { performedBy: { select: { id: true, name: true } } },
-    });
+    return this.db.query(`
+      SELECT al.*,
+        json_build_object('id', u.id, 'name', u.name) AS "performedBy"
+      FROM audit_logs al
+      JOIN users u ON u.id = al."performedById"
+      WHERE al."entityType" = $1 AND al."entityId" = $2
+      ORDER BY al."createdAt" ASC
+    `, [entityType, entityId]);
   }
 }

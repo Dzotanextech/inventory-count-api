@@ -1,14 +1,6 @@
 import { ApiProperty, ApiPropertyOptional } from '@nestjs/swagger';
-import {
-  IsDateString,
-  IsEnum,
-  IsOptional,
-  IsString,
-  IsUUID,
-  IsArray,
-  MaxLength,
-} from 'class-validator';
-import { InventoryCountType } from '@prisma/client';
+import { IsDateString, IsEnum, IsOptional, IsString, IsUUID, IsArray, MaxLength } from 'class-validator';
+import { InventoryCountType } from '../../common/enums';
 
 export class CreateInventoryCountDto {
   @ApiProperty({ description: 'Warehouse to count' })
@@ -34,7 +26,6 @@ export class CreateInventoryCountDto {
   @MaxLength(1000)
   notes?: string;
 
-  // Optional filters (used based on countType)
   @ApiPropertyOptional({ description: 'Category ID (for CATEGORY type counts)' })
   @IsOptional()
   @IsUUID()

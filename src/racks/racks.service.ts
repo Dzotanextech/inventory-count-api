@@ -1,4 +1,4 @@
-import { Injectable, NotFoundException, ConflictException, BadRequestException } from '@nestjs/common';
+import { Injectable, NotFoundException, ConflictException, BadRequestException, HttpException, InternalServerErrorException } from '@nestjs/common';
 import { DatabaseService } from '../database/database.service';
 import { CreateRackDto } from './dto/create-rack.dto';
 import { UpdateRackDto } from './dto/update-rack.dto';
@@ -21,105 +21,132 @@ export class RacksService {
   constructor(private db: DatabaseService) {}
 
   async findAll(query: PaginationDto & { zoneId?: string; warehouseId?: string }) {
-    const params: any[] = [];
-    const conditions: string[] = [];
+    try {
+      const params: any[] = [];
+      const conditions: string[] = [];
 
-    if (query.zoneId) { params.push(query.zoneId); conditions.push(`r."zoneId" = $${params.length}`); }
-    if (query.warehouseId) { params.push(query.warehouseId); conditions.push(`z."warehouseId" = $${params.length}`); }
-    if (query.search) {
-      params.push(`%${query.search}%`);
-      conditions.push(`(r."rackCode" ILIKE $${params.length} OR r.barcode ILIKE $${params.length})`);
+      if (query.zoneId) { params.push(query.zoneId); conditions.push(`r."zoneId" = $${params.length}`); }
+      if (query.warehouseId) { params.push(query.warehouseId); conditions.push(`z."warehouseId" = $${params.length}`); }
+      if (query.search) {
+        params.push(`%${query.search}%`);
+        conditions.push(`(r."rackCode" ILIKE $${params.length} OR r.barcode ILIKE $${params.length})`);
+      }
+
+      const where = conditions.length ? `WHERE ${conditions.join(' AND ')}` : '';
+      params.push(query.limit, query.skip);
+      const limitIdx = params.length - 1;
+      const offsetIdx = params.length;
+
+      const data = await this.db.query(`
+        ${RACK_ZONE_SQL}
+        ${where}
+        ORDER BY r."rackCode" ASC
+        LIMIT $${limitIdx} OFFSET $${offsetIdx}
+      `, params);
+
+      const countParams = params.slice(0, params.length - 2);
+      const [{ count }] = await this.db.query<{ count: string }>(
+        `SELECT COUNT(*)::int AS count FROM racks r JOIN zones z ON z.id = r."zoneId" ${where}`,
+        countParams,
+      );
+
+      return paginate(data, Number(count), query.page, query.limit);
+    } catch (error) {
+      if (error instanceof HttpException) throw error;
+      throw new InternalServerErrorException('An unexpected error occurred');
     }
-
-    const where = conditions.length ? `WHERE ${conditions.join(' AND ')}` : '';
-    params.push(query.limit, query.skip);
-    const limitIdx = params.length - 1;
-    const offsetIdx = params.length;
-
-    const data = await this.db.query(`
-      ${RACK_ZONE_SQL}
-      ${where}
-      ORDER BY r."rackCode" ASC
-      LIMIT $${limitIdx} OFFSET $${offsetIdx}
-    `, params);
-
-    const countParams = params.slice(0, params.length - 2);
-    const [{ count }] = await this.db.query<{ count: string }>(
-      `SELECT COUNT(*)::int AS count FROM racks r JOIN zones z ON z.id = r."zoneId" ${where}`,
-      countParams,
-    );
-
-    return paginate(data, Number(count), query.page, query.limit);
   }
 
   async findOne(id: string) {
-    const rack = await this.db.queryOne(`${RACK_ZONE_SQL} WHERE r.id = $1`, [id]);
-    if (!rack) throw new NotFoundException(`Rack ${id} not found`);
-    return rack;
+    try {
+      const rack = await this.db.queryOne(`${RACK_ZONE_SQL} WHERE r.id = $1`, [id]);
+      if (!rack) throw new NotFoundException(`Rack ${id} not found`);
+      return rack;
+    } catch (error) {
+      if (error instanceof HttpException) throw error;
+      throw new InternalServerErrorException('An unexpected error occurred');
+    }
   }
 
   async findByBarcode(barcode: string) {
-    const rack = await this.db.queryOne(`SELECT * FROM racks WHERE barcode = $1`, [barcode]);
-    if (!rack) throw new NotFoundException(`Rack with barcode '${barcode}' not found`);
-    return rack;
+    try {
+      const rack = await this.db.queryOne(`SELECT * FROM racks WHERE barcode = $1`, [barcode]);
+      if (!rack) throw new NotFoundException(`Rack with barcode '${barcode}' not found`);
+      return rack;
+    } catch (error) {
+      if (error instanceof HttpException) throw error;
+      throw new InternalServerErrorException('An unexpected error occurred');
+    }
   }
 
   async create(dto: CreateRackDto) {
-    const codeConflict = await this.db.queryOne(
-      `SELECT id FROM racks WHERE "zoneId" = $1 AND "rackCode" = $2`,
-      [dto.zoneId, dto.rackCode],
-    );
-    if (codeConflict) throw new ConflictException(`Rack code '${dto.rackCode}' already exists in this zone`);
+    try {
+      const codeConflict = await this.db.queryOne(
+        `SELECT id FROM racks WHERE "zoneId" = $1 AND "rackCode" = $2`,
+        [dto.zoneId, dto.rackCode],
+      );
+      if (codeConflict) throw new ConflictException(`Rack code '${dto.rackCode}' already exists in this zone`);
 
-    const barcodeConflict = await this.db.queryOne(`SELECT id FROM racks WHERE barcode = $1`, [dto.barcode]);
-    if (barcodeConflict) throw new ConflictException(`Barcode '${dto.barcode}' already in use`);
+      const barcodeConflict = await this.db.queryOne(`SELECT id FROM racks WHERE barcode = $1`, [dto.barcode]);
+      if (barcodeConflict) throw new ConflictException(`Barcode '${dto.barcode}' already in use`);
 
-    const [row] = await this.db.query(`
-      INSERT INTO racks (id, "zoneId", "rackCode", barcode, "binCount", "isActive")
-      VALUES ($1, $2, $3, $4, $5, $6) RETURNING *
-    `, [uuidv4(), dto.zoneId, dto.rackCode, dto.barcode, dto.binCount ?? 1, dto.isActive ?? true]);
+      const [row] = await this.db.query(`
+        INSERT INTO racks (id, "zoneId", "rackCode", barcode, "binCount", "isActive")
+        VALUES ($1, $2, $3, $4, $5, $6) RETURNING *
+      `, [uuidv4(), dto.zoneId, dto.rackCode, dto.barcode, dto.binCount ?? 1, dto.isActive ?? true]);
 
-    return this.findOne(row.id);
+      return this.findOne(row.id);
+    } catch (error) {
+      if (error instanceof HttpException) throw error;
+      throw new InternalServerErrorException('An unexpected error occurred');
+    }
   }
 
   async update(id: string, dto: UpdateRackDto) {
-    const rack = await this.findOne(id) as any;
+    try {
+      const rack = await this.findOne(id) as any;
 
-    if (dto.rackCode) {
-      const dup = await this.db.queryOne(
-        `SELECT id FROM racks WHERE "zoneId" = $1 AND "rackCode" = $2 AND id != $3`,
-        [rack.zoneId, dto.rackCode, id],
-      );
-      if (dup) throw new ConflictException(`Rack code '${dto.rackCode}' already in use`);
+      if (dto.rackCode) {
+        const dup = await this.db.queryOne(
+          `SELECT id FROM racks WHERE "zoneId" = $1 AND "rackCode" = $2 AND id != $3`,
+          [rack.zoneId, dto.rackCode, id],
+        );
+        if (dup) throw new ConflictException(`Rack code '${dto.rackCode}' already in use`);
+      }
+
+      if (dto.barcode) {
+        const dup = await this.db.queryOne(`SELECT id FROM racks WHERE barcode = $1 AND id != $2`, [dto.barcode, id]);
+        if (dup) throw new ConflictException(`Barcode '${dto.barcode}' already in use`);
+      }
+
+      const fields: string[] = [];
+      const params: any[] = [];
+
+      if (dto.rackCode) { params.push(dto.rackCode); fields.push(`"rackCode" = $${params.length}`); }
+      if (dto.barcode) { params.push(dto.barcode); fields.push(`barcode = $${params.length}`); }
+      if (dto.binCount !== undefined) { params.push(dto.binCount); fields.push(`"binCount" = $${params.length}`); }
+      if (dto.isActive !== undefined) { params.push(dto.isActive); fields.push(`"isActive" = $${params.length}`); }
+
+      if (fields.length === 0) return rack;
+
+      params.push(id);
+      await this.db.query(`UPDATE racks SET ${fields.join(', ')} WHERE id = $${params.length}`, params);
+      return this.findOne(id);
+    } catch (error) {
+      if (error instanceof HttpException) throw error;
+      throw new InternalServerErrorException('An unexpected error occurred');
     }
-
-    if (dto.barcode) {
-      const dup = await this.db.queryOne(`SELECT id FROM racks WHERE barcode = $1 AND id != $2`, [dto.barcode, id]);
-      if (dup) throw new ConflictException(`Barcode '${dto.barcode}' already in use`);
-    }
-
-    const fields: string[] = [];
-    const params: any[] = [];
-
-    if (dto.rackCode) { params.push(dto.rackCode); fields.push(`"rackCode" = $${params.length}`); }
-    if (dto.barcode) { params.push(dto.barcode); fields.push(`barcode = $${params.length}`); }
-    if (dto.binCount !== undefined) { params.push(dto.binCount); fields.push(`"binCount" = $${params.length}`); }
-    if (dto.isActive !== undefined) { params.push(dto.isActive); fields.push(`"isActive" = $${params.length}`); }
-
-    if (fields.length === 0) return rack;
-
-    params.push(id);
-    await this.db.query(`UPDATE racks SET ${fields.join(', ')} WHERE id = $${params.length}`, params);
-    return this.findOne(id);
   }
 
   async remove(id: string) {
-    await this.findOne(id);
     try {
+      await this.findOne(id);
       const [row] = await this.db.query(`DELETE FROM racks WHERE id = $1 RETURNING *`, [id]);
       return row;
-    } catch {
-      throw new BadRequestException('Cannot delete rack — it has linked inventory records. Remove those first.');
+    } catch (error) {
+      if (error instanceof HttpException) throw error;
+      if ((error as any).code === '23503') throw new BadRequestException('Cannot delete rack — it has linked inventory records. Remove those first.');
+      throw new InternalServerErrorException('An unexpected error occurred');
     }
   }
 }

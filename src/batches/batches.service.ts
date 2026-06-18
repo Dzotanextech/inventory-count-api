@@ -1,4 +1,4 @@
-import { Injectable, NotFoundException, ConflictException } from '@nestjs/common';
+import { Injectable, NotFoundException, ConflictException, BadRequestException, HttpException, InternalServerErrorException } from '@nestjs/common';
 import { DatabaseService } from '../database/database.service';
 import { CreateBatchDto } from './dto/create-batch.dto';
 import { UpdateBatchDto } from './dto/update-batch.dto';
@@ -17,93 +17,119 @@ export class BatchesService {
   constructor(private db: DatabaseService) {}
 
   async findAll(query: PaginationDto & { productId?: string }) {
-    const params: any[] = [];
-    const conditions: string[] = [];
+    try {
+      const params: any[] = [];
+      const conditions: string[] = [];
 
-    if (query.productId) { params.push(query.productId); conditions.push(`b."productId" = $${params.length}`); }
-    if (query.search) {
-      params.push(`%${query.search}%`);
-      conditions.push(`b."batchNumber" ILIKE $${params.length}`);
+      if (query.productId) { params.push(query.productId); conditions.push(`b."productId" = $${params.length}`); }
+      if (query.search) {
+        params.push(`%${query.search}%`);
+        conditions.push(`b."batchNumber" ILIKE $${params.length}`);
+      }
+
+      const where = conditions.length ? `WHERE ${conditions.join(' AND ')}` : '';
+      params.push(query.limit, query.skip);
+      const limitIdx = params.length - 1;
+      const offsetIdx = params.length;
+
+      const data = await this.db.query(
+        `${BATCH_SQL} ${where} ORDER BY b."batchNumber" ASC LIMIT $${limitIdx} OFFSET $${offsetIdx}`,
+        params,
+      );
+
+      const countParams = params.slice(0, params.length - 2);
+      const [{ count }] = await this.db.query<{ count: string }>(
+        `SELECT COUNT(*)::int AS count FROM batches b ${where}`,
+        countParams,
+      );
+
+      return paginate(data, Number(count), query.page, query.limit);
+    } catch (error) {
+      if (error instanceof HttpException) throw error;
+      throw new InternalServerErrorException('An unexpected error occurred');
     }
-
-    const where = conditions.length ? `WHERE ${conditions.join(' AND ')}` : '';
-    params.push(query.limit, query.skip);
-    const limitIdx = params.length - 1;
-    const offsetIdx = params.length;
-
-    const data = await this.db.query(
-      `${BATCH_SQL} ${where} ORDER BY b."batchNumber" ASC LIMIT $${limitIdx} OFFSET $${offsetIdx}`,
-      params,
-    );
-
-    const countParams = params.slice(0, params.length - 2);
-    const [{ count }] = await this.db.query<{ count: string }>(
-      `SELECT COUNT(*)::int AS count FROM batches b ${where}`,
-      countParams,
-    );
-
-    return paginate(data, Number(count), query.page, query.limit);
   }
 
   async findOne(id: string) {
-    const batch = await this.db.queryOne(`${BATCH_SQL} WHERE b.id = $1`, [id]);
-    if (!batch) throw new NotFoundException(`Batch ${id} not found`);
-    return batch;
+    try {
+      const batch = await this.db.queryOne(`${BATCH_SQL} WHERE b.id = $1`, [id]);
+      if (!batch) throw new NotFoundException(`Batch ${id} not found`);
+      return batch;
+    } catch (error) {
+      if (error instanceof HttpException) throw error;
+      throw new InternalServerErrorException('An unexpected error occurred');
+    }
   }
 
   async create(dto: CreateBatchDto) {
-    const dup = await this.db.queryOne(
-      `SELECT id FROM batches WHERE "productId" = $1 AND "batchNumber" = $2`,
-      [dto.productId, dto.batchNumber],
-    );
-    if (dup) throw new ConflictException(`Batch '${dto.batchNumber}' already exists for this product`);
+    try {
+      const dup = await this.db.queryOne(
+        `SELECT id FROM batches WHERE "productId" = $1 AND "batchNumber" = $2`,
+        [dto.productId, dto.batchNumber],
+      );
+      if (dup) throw new ConflictException(`Batch '${dto.batchNumber}' already exists for this product`);
 
-    const [row] = await this.db.query(`
-      INSERT INTO batches (id, "productId", "batchNumber", "manufacturingDate", "expiryDate")
-      VALUES ($1, $2, $3, $4, $5) RETURNING *
-    `, [
-      uuidv4(), dto.productId, dto.batchNumber,
-      dto.manufacturingDate ? new Date(dto.manufacturingDate) : null,
-      dto.expiryDate ? new Date(dto.expiryDate) : null,
-    ]);
+      const [row] = await this.db.query(`
+        INSERT INTO batches (id, "productId", "batchNumber", "manufacturingDate", "expiryDate")
+        VALUES ($1, $2, $3, $4, $5) RETURNING *
+      `, [
+        uuidv4(), dto.productId, dto.batchNumber,
+        dto.manufacturingDate ? new Date(dto.manufacturingDate) : null,
+        dto.expiryDate ? new Date(dto.expiryDate) : null,
+      ]);
 
-    return this.findOne(row.id);
+      return this.findOne(row.id);
+    } catch (error) {
+      if (error instanceof HttpException) throw error;
+      throw new InternalServerErrorException('An unexpected error occurred');
+    }
   }
 
   async update(id: string, dto: UpdateBatchDto) {
-    const batch = await this.findOne(id) as any;
+    try {
+      const batch = await this.findOne(id) as any;
 
-    if (dto.batchNumber) {
-      const dup = await this.db.queryOne(
-        `SELECT id FROM batches WHERE "productId" = $1 AND "batchNumber" = $2 AND id != $3`,
-        [batch.productId, dto.batchNumber, id],
-      );
-      if (dup) throw new ConflictException(`Batch number '${dto.batchNumber}' already in use`);
+      if (dto.batchNumber) {
+        const dup = await this.db.queryOne(
+          `SELECT id FROM batches WHERE "productId" = $1 AND "batchNumber" = $2 AND id != $3`,
+          [batch.productId, dto.batchNumber, id],
+        );
+        if (dup) throw new ConflictException(`Batch number '${dto.batchNumber}' already in use`);
+      }
+
+      const fields: string[] = [];
+      const params: any[] = [];
+
+      if (dto.batchNumber) { params.push(dto.batchNumber); fields.push(`"batchNumber" = $${params.length}`); }
+      if (dto.manufacturingDate !== undefined) {
+        params.push(dto.manufacturingDate ? new Date(dto.manufacturingDate) : null);
+        fields.push(`"manufacturingDate" = $${params.length}`);
+      }
+      if (dto.expiryDate !== undefined) {
+        params.push(dto.expiryDate ? new Date(dto.expiryDate) : null);
+        fields.push(`"expiryDate" = $${params.length}`);
+      }
+
+      if (fields.length === 0) return batch;
+
+      params.push(id);
+      await this.db.query(`UPDATE batches SET ${fields.join(', ')} WHERE id = $${params.length}`, params);
+      return this.findOne(id);
+    } catch (error) {
+      if (error instanceof HttpException) throw error;
+      throw new InternalServerErrorException('An unexpected error occurred');
     }
-
-    const fields: string[] = [];
-    const params: any[] = [];
-
-    if (dto.batchNumber) { params.push(dto.batchNumber); fields.push(`"batchNumber" = $${params.length}`); }
-    if (dto.manufacturingDate !== undefined) {
-      params.push(dto.manufacturingDate ? new Date(dto.manufacturingDate) : null);
-      fields.push(`"manufacturingDate" = $${params.length}`);
-    }
-    if (dto.expiryDate !== undefined) {
-      params.push(dto.expiryDate ? new Date(dto.expiryDate) : null);
-      fields.push(`"expiryDate" = $${params.length}`);
-    }
-
-    if (fields.length === 0) return batch;
-
-    params.push(id);
-    await this.db.query(`UPDATE batches SET ${fields.join(', ')} WHERE id = $${params.length}`, params);
-    return this.findOne(id);
   }
 
   async remove(id: string) {
-    await this.findOne(id);
-    const [row] = await this.db.query(`DELETE FROM batches WHERE id = $1 RETURNING *`, [id]);
-    return row;
+    try {
+      await this.findOne(id);
+      const [row] = await this.db.query(`DELETE FROM batches WHERE id = $1 RETURNING *`, [id]);
+      return row;
+    } catch (error) {
+      if (error instanceof HttpException) throw error;
+      if ((error as any).code === '23503') throw new BadRequestException('Cannot delete batch — it has linked inventory count items. Remove those first.');
+      throw new InternalServerErrorException('An unexpected error occurred');
+    }
   }
 }

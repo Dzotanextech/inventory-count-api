@@ -1,4 +1,4 @@
-import { Injectable, UnauthorizedException, HttpException, InternalServerErrorException } from '@nestjs/common';
+import { Injectable, UnauthorizedException, HttpException, InternalServerErrorException, Logger } from '@nestjs/common';
 import { JwtService } from '@nestjs/jwt';
 import { ConfigService } from '@nestjs/config';
 import { DatabaseService } from '../database/database.service';
@@ -10,6 +10,8 @@ import { JwtPayload } from '../common/decorators/current-user.decorator';
 
 @Injectable()
 export class AuthService {
+  private readonly logger = new Logger(AuthService.name);
+
   constructor(
     private db: DatabaseService,
     private jwtService: JwtService,
@@ -31,9 +33,10 @@ export class AuthService {
       if (!isMatch) return null;
 
       return { ...user, role: { id: user.roleId, name: user.roleName } };
-    } catch (error) {
+    } catch (error: any) {
       if (error instanceof HttpException) throw error;
-      throw new InternalServerErrorException('An unexpected error occurred');
+      this.logger.error(error.message, error.stack);
+      throw new InternalServerErrorException(error.message);
     }
   }
 
@@ -42,9 +45,10 @@ export class AuthService {
       const user = await this.validateUser(dto.email, dto.password);
       if (!user) throw new UnauthorizedException('Invalid email or password');
       return this.generateAuthResponse(user);
-    } catch (error) {
+    } catch (error: any) {
       if (error instanceof HttpException) throw error;
-      throw new InternalServerErrorException('An unexpected error occurred');
+      this.logger.error(error.message, error.stack);
+      throw new InternalServerErrorException(error.message);
     }
   }
 
@@ -78,9 +82,10 @@ export class AuthService {
         role: { id: matched.roleId, name: matched.roleName },
       };
       return this.generateAuthResponse(user);
-    } catch (error) {
+    } catch (error: any) {
       if (error instanceof HttpException) throw error;
-      throw new InternalServerErrorException('An unexpected error occurred');
+      this.logger.error(error.message, error.stack);
+      throw new InternalServerErrorException(error.message);
     }
   }
 
@@ -100,9 +105,10 @@ export class AuthService {
       }
 
       return { message: 'Logged out successfully' };
-    } catch (error) {
+    } catch (error: any) {
       if (error instanceof HttpException) throw error;
-      throw new InternalServerErrorException('An unexpected error occurred');
+      this.logger.error(error.message, error.stack);
+      throw new InternalServerErrorException(error.message);
     }
   }
 
@@ -110,9 +116,10 @@ export class AuthService {
     try {
       await this.db.query(`DELETE FROM refresh_tokens WHERE "userId" = $1`, [userId]);
       return { message: 'All sessions terminated' };
-    } catch (error) {
+    } catch (error: any) {
       if (error instanceof HttpException) throw error;
-      throw new InternalServerErrorException('An unexpected error occurred');
+      this.logger.error(error.message, error.stack);
+      throw new InternalServerErrorException(error.message);
     }
   }
 
@@ -144,9 +151,10 @@ export class AuthService {
         user: { id: user.id, name: user.name, email: user.email, role: user.role.name },
         tokens: { accessToken, refreshToken: rawRefreshToken, expiresIn: 15 * 60 },
       };
-    } catch (error) {
+    } catch (error: any) {
       if (error instanceof HttpException) throw error;
-      throw new InternalServerErrorException('An unexpected error occurred');
+      this.logger.error(error.message, error.stack);
+      throw new InternalServerErrorException(error.message);
     }
   }
 }

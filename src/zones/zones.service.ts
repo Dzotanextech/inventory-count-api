@@ -1,4 +1,4 @@
-import { Injectable, NotFoundException, ConflictException, BadRequestException, HttpException, InternalServerErrorException } from '@nestjs/common';
+import { Injectable, NotFoundException, ConflictException, BadRequestException, HttpException, InternalServerErrorException, Logger } from '@nestjs/common';
 import { DatabaseService } from '../database/database.service';
 import { CreateZoneDto } from './dto/create-zone.dto';
 import { UpdateZoneDto } from './dto/update-zone.dto';
@@ -7,6 +7,8 @@ import { v4 as uuidv4 } from 'uuid';
 
 @Injectable()
 export class ZonesService {
+  private readonly logger = new Logger(ZonesService.name);
+
   constructor(private db: DatabaseService) {}
 
   async findAll(query: PaginationDto & { warehouseId?: string }) {
@@ -48,9 +50,10 @@ export class ZonesService {
 
       const shaped = data.map((r) => ({ ...r, _count: { racks: r.rackCount }, rackCount: undefined }));
       return paginate(shaped, Number(count), query.page, query.limit);
-    } catch (error) {
+    } catch (error: any) {
       if (error instanceof HttpException) throw error;
-      throw new InternalServerErrorException('An unexpected error occurred');
+      this.logger.error(error.message, error.stack);
+      throw new InternalServerErrorException(error.message);
     }
   }
 
@@ -67,9 +70,10 @@ export class ZonesService {
 
       const racks = await this.db.query(`SELECT * FROM racks WHERE "zoneId" = $1`, [id]);
       return { ...zone, racks };
-    } catch (error) {
+    } catch (error: any) {
       if (error instanceof HttpException) throw error;
-      throw new InternalServerErrorException('An unexpected error occurred');
+      this.logger.error(error.message, error.stack);
+      throw new InternalServerErrorException(error.message);
     }
   }
 
@@ -87,9 +91,10 @@ export class ZonesService {
       `, [uuidv4(), dto.warehouseId, dto.code, dto.name]);
 
       return this.findOne(row.id);
-    } catch (error) {
+    } catch (error: any) {
       if (error instanceof HttpException) throw error;
-      throw new InternalServerErrorException('An unexpected error occurred');
+      this.logger.error(error.message, error.stack);
+      throw new InternalServerErrorException(error.message);
     }
   }
 
@@ -116,9 +121,10 @@ export class ZonesService {
       params.push(id);
       await this.db.query(`UPDATE zones SET ${fields.join(', ')} WHERE id = $${params.length}`, params);
       return this.findOne(id);
-    } catch (error) {
+    } catch (error: any) {
       if (error instanceof HttpException) throw error;
-      throw new InternalServerErrorException('An unexpected error occurred');
+      this.logger.error(error.message, error.stack);
+      throw new InternalServerErrorException(error.message);
     }
   }
 
@@ -127,10 +133,11 @@ export class ZonesService {
       await this.findOne(id);
       const [row] = await this.db.query(`DELETE FROM zones WHERE id = $1 RETURNING *`, [id]);
       return row;
-    } catch (error) {
+    } catch (error: any) {
       if (error instanceof HttpException) throw error;
-      if ((error as any).code === '23503') throw new BadRequestException('Cannot delete zone — it has linked racks. Remove those first.');
-      throw new InternalServerErrorException('An unexpected error occurred');
+      if (error.code === '23503') throw new BadRequestException('Cannot delete zone — it has linked racks. Remove those first.');
+      this.logger.error(error.message, error.stack);
+      throw new InternalServerErrorException(error.message);
     }
   }
 }

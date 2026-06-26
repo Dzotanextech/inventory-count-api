@@ -1,4 +1,4 @@
-import { Injectable, NotFoundException, BadRequestException, HttpException, InternalServerErrorException } from '@nestjs/common';
+import { Injectable, NotFoundException, BadRequestException, HttpException, InternalServerErrorException, Logger } from '@nestjs/common';
 import { DatabaseService } from '../database/database.service';
 import { AuditService } from '../audit/audit.service';
 import { CreateCountItemDto } from './dto/create-count-item.dto';
@@ -22,6 +22,8 @@ const ITEM_SQL = `
 
 @Injectable()
 export class InventoryCountItemsService {
+  private readonly logger = new Logger(InventoryCountItemsService.name);
+
   constructor(
     private db: DatabaseService,
     private auditService: AuditService,
@@ -30,9 +32,10 @@ export class InventoryCountItemsService {
   async findAll(inventoryCountId: string) {
     try {
       return await this.db.query(`${ITEM_SQL} WHERE ici."inventoryCountId" = $1 ORDER BY p.name ASC`, [inventoryCountId]);
-    } catch (error) {
+    } catch (error: any) {
       if (error instanceof HttpException) throw error;
-      throw new InternalServerErrorException('An unexpected error occurred');
+      this.logger.error(error.message, error.stack);
+      throw new InternalServerErrorException(error.message);
     }
   }
 
@@ -41,13 +44,14 @@ export class InventoryCountItemsService {
       const item = await this.db.queryOne(`${ITEM_SQL} WHERE ici.id = $1`, [id]);
       if (!item) throw new NotFoundException(`Count item ${id} not found`);
       return item;
-    } catch (error) {
+    } catch (error: any) {
       if (error instanceof HttpException) throw error;
-      throw new InternalServerErrorException('An unexpected error occurred');
+      this.logger.error(error.message, error.stack);
+      throw new InternalServerErrorException(error.message);
     }
   }
 
-  async addItem(dto: CreateCountItemDto, userId: string) {
+  async addItem(dto: CreateCountItemDto, _userId: string) {
     try {
       const count = await this.db.queryOne<any>(`SELECT * FROM inventory_counts WHERE id = $1`, [dto.inventoryCountId]);
       if (!count) throw new NotFoundException(`Inventory count not found`);
@@ -61,9 +65,10 @@ export class InventoryCountItemsService {
       `, [uuidv4(), dto.inventoryCountId, dto.productId, dto.batchId ?? null, dto.rackId ?? null, dto.systemQty]);
 
       return this.findOne(row.id);
-    } catch (error) {
+    } catch (error: any) {
       if (error instanceof HttpException) throw error;
-      throw new InternalServerErrorException('An unexpected error occurred');
+      this.logger.error(error.message, error.stack);
+      throw new InternalServerErrorException(error.message);
     }
   }
 
@@ -101,9 +106,10 @@ export class InventoryCountItemsService {
       });
 
       return this.findOne(id);
-    } catch (error) {
+    } catch (error: any) {
       if (error instanceof HttpException) throw error;
-      throw new InternalServerErrorException('An unexpected error occurred');
+      this.logger.error(error.message, error.stack);
+      throw new InternalServerErrorException(error.message);
     }
   }
 
@@ -150,9 +156,10 @@ export class InventoryCountItemsService {
           dto.remarks ?? null, userId]);
 
       return this.findOne(row.id);
-    } catch (error) {
+    } catch (error: any) {
       if (error instanceof HttpException) throw error;
-      throw new InternalServerErrorException('An unexpected error occurred');
+      this.logger.error(error.message, error.stack);
+      throw new InternalServerErrorException(error.message);
     }
   }
 }

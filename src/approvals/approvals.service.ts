@@ -1,9 +1,11 @@
-import { Injectable, NotFoundException, HttpException, InternalServerErrorException } from '@nestjs/common';
+import { Injectable, NotFoundException, HttpException, InternalServerErrorException, Logger } from '@nestjs/common';
 import { DatabaseService } from '../database/database.service';
 import { PaginationDto, paginate } from '../common/dto/pagination.dto';
 
 @Injectable()
 export class ApprovalsService {
+  private readonly logger = new Logger(ApprovalsService.name);
+
   constructor(private db: DatabaseService) {}
 
   async findAll(query: PaginationDto & { inventoryCountId?: string }) {
@@ -40,9 +42,10 @@ export class ApprovalsService {
       );
 
       return paginate(data, Number(count), query.page, query.limit);
-    } catch (error) {
+    } catch (error: any) {
       if (error instanceof HttpException) throw error;
-      throw new InternalServerErrorException('An unexpected error occurred');
+      this.logger.error(error.message, error.stack);
+      throw new InternalServerErrorException(error.message);
     }
   }
 
@@ -60,9 +63,10 @@ export class ApprovalsService {
 
       if (!approval) throw new NotFoundException(`Approval ${id} not found`);
       return approval;
-    } catch (error) {
+    } catch (error: any) {
       if (error instanceof HttpException) throw error;
-      throw new InternalServerErrorException('An unexpected error occurred');
+      this.logger.error(error.message, error.stack);
+      throw new InternalServerErrorException(error.message);
     }
   }
 
@@ -76,9 +80,10 @@ export class ApprovalsService {
         WHERE a."inventoryCountId" = $1
         ORDER BY a."createdAt" ASC
       `, [inventoryCountId]);
-    } catch (error) {
+    } catch (error: any) {
       if (error instanceof HttpException) throw error;
-      throw new InternalServerErrorException('An unexpected error occurred');
+      this.logger.error(error.message, error.stack);
+      throw new InternalServerErrorException(error.message);
     }
   }
 }

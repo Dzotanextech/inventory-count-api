@@ -1,4 +1,4 @@
-import { Injectable, NotFoundException, ConflictException, BadRequestException, HttpException, InternalServerErrorException } from '@nestjs/common';
+import { Injectable, NotFoundException, ConflictException, BadRequestException, HttpException, InternalServerErrorException, Logger } from '@nestjs/common';
 import { DatabaseService } from '../database/database.service';
 import { CreateProductDto } from './dto/create-product.dto';
 import { UpdateProductDto } from './dto/update-product.dto';
@@ -14,6 +14,8 @@ const PRODUCT_SQL = `
 
 @Injectable()
 export class ProductsService {
+  private readonly logger = new Logger(ProductsService.name);
+
   constructor(private db: DatabaseService) {}
 
   async findAll(query: PaginationDto & { categoryId?: string }) {
@@ -41,9 +43,10 @@ export class ProductsService {
       );
 
       return paginate(data, Number(count), query.page, query.limit);
-    } catch (error) {
+    } catch (error: any) {
       if (error instanceof HttpException) throw error;
-      throw new InternalServerErrorException('An unexpected error occurred');
+      this.logger.error(error.message, error.stack);
+      throw new InternalServerErrorException(error.message);
     }
   }
 
@@ -54,9 +57,10 @@ export class ProductsService {
 
       const batches = await this.db.query(`SELECT * FROM batches WHERE "productId" = $1`, [id]);
       return { ...product, batches };
-    } catch (error) {
+    } catch (error: any) {
       if (error instanceof HttpException) throw error;
-      throw new InternalServerErrorException('An unexpected error occurred');
+      this.logger.error(error.message, error.stack);
+      throw new InternalServerErrorException(error.message);
     }
   }
 
@@ -67,9 +71,10 @@ export class ProductsService {
 
       const batches = await this.db.query(`SELECT * FROM batches WHERE "productId" = $1`, [product.id]);
       return { ...product, batches };
-    } catch (error) {
+    } catch (error: any) {
       if (error instanceof HttpException) throw error;
-      throw new InternalServerErrorException('An unexpected error occurred');
+      this.logger.error(error.message, error.stack);
+      throw new InternalServerErrorException(error.message);
     }
   }
 
@@ -88,9 +93,10 @@ export class ProductsService {
           dto.uom, dto.costPrice, dto.sellingPrice, dto.isBatchTracked ?? false]);
 
       return this.findOne(row.id);
-    } catch (error) {
+    } catch (error: any) {
       if (error instanceof HttpException) throw error;
-      throw new InternalServerErrorException('An unexpected error occurred');
+      this.logger.error(error.message, error.stack);
+      throw new InternalServerErrorException(error.message);
     }
   }
 
@@ -127,9 +133,10 @@ export class ProductsService {
       params.push(id);
       await this.db.query(`UPDATE products SET ${fields.join(', ')} WHERE id = $${params.length}`, params);
       return this.findOne(id);
-    } catch (error) {
+    } catch (error: any) {
       if (error instanceof HttpException) throw error;
-      throw new InternalServerErrorException('An unexpected error occurred');
+      this.logger.error(error.message, error.stack);
+      throw new InternalServerErrorException(error.message);
     }
   }
 
@@ -138,10 +145,11 @@ export class ProductsService {
       await this.findOne(id);
       const [row] = await this.db.query(`DELETE FROM products WHERE id = $1 RETURNING *`, [id]);
       return row;
-    } catch (error) {
+    } catch (error: any) {
       if (error instanceof HttpException) throw error;
-      if ((error as any).code === '23503') throw new BadRequestException('Cannot delete product — it has linked batches or inventory records. Remove those first.');
-      throw new InternalServerErrorException('An unexpected error occurred');
+      if (error.code === '23503') throw new BadRequestException('Cannot delete product — it has linked batches or inventory records. Remove those first.');
+      this.logger.error(error.message, error.stack);
+      throw new InternalServerErrorException(error.message);
     }
   }
 }

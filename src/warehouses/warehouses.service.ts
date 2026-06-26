@@ -1,4 +1,4 @@
-import { Injectable, NotFoundException, ConflictException, BadRequestException, HttpException, InternalServerErrorException } from '@nestjs/common';
+import { Injectable, NotFoundException, ConflictException, BadRequestException, HttpException, InternalServerErrorException, Logger } from '@nestjs/common';
 import { DatabaseService } from '../database/database.service';
 import { CreateWarehouseDto } from './dto/create-warehouse.dto';
 import { UpdateWarehouseDto } from './dto/update-warehouse.dto';
@@ -7,6 +7,8 @@ import { v4 as uuidv4 } from 'uuid';
 
 @Injectable()
 export class WarehousesService {
+  private readonly logger = new Logger(WarehousesService.name);
+
   constructor(private db: DatabaseService) {}
 
   async findAll(query: PaginationDto) {
@@ -42,9 +44,10 @@ export class WarehousesService {
 
       const shaped = data.map((r) => ({ ...r, _count: { zones: r.zoneCount }, zoneCount: undefined }));
       return paginate(shaped, Number(count), query.page, query.limit);
-    } catch (error) {
+    } catch (error: any) {
       if (error instanceof HttpException) throw error;
-      throw new InternalServerErrorException('An unexpected error occurred');
+      this.logger.error(error.message, error.stack);
+      throw new InternalServerErrorException(error.message);
     }
   }
 
@@ -63,9 +66,10 @@ export class WarehousesService {
       `, [id]);
 
       return { ...wh, zones };
-    } catch (error) {
+    } catch (error: any) {
       if (error instanceof HttpException) throw error;
-      throw new InternalServerErrorException('An unexpected error occurred');
+      this.logger.error(error.message, error.stack);
+      throw new InternalServerErrorException(error.message);
     }
   }
 
@@ -81,9 +85,10 @@ export class WarehousesService {
         [uuidv4(), dto.code, dto.name, dto.address, now],
       );
       return row;
-    } catch (error) {
+    } catch (error: any) {
       if (error instanceof HttpException) throw error;
-      throw new InternalServerErrorException('An unexpected error occurred');
+      this.logger.error(error.message, error.stack);
+      throw new InternalServerErrorException(error.message);
     }
   }
 
@@ -109,9 +114,10 @@ export class WarehousesService {
         params,
       );
       return row;
-    } catch (error) {
+    } catch (error: any) {
       if (error instanceof HttpException) throw error;
-      throw new InternalServerErrorException('An unexpected error occurred');
+      this.logger.error(error.message, error.stack);
+      throw new InternalServerErrorException(error.message);
     }
   }
 
@@ -120,10 +126,11 @@ export class WarehousesService {
       await this.findOne(id);
       const [row] = await this.db.query(`DELETE FROM warehouses WHERE id = $1 RETURNING *`, [id]);
       return row;
-    } catch (error) {
+    } catch (error: any) {
       if (error instanceof HttpException) throw error;
-      if ((error as any).code === '23503') throw new BadRequestException('Cannot delete warehouse — it has linked zones, racks, or inventory records. Remove those first.');
-      throw new InternalServerErrorException('An unexpected error occurred');
+      if (error.code === '23503') throw new BadRequestException('Cannot delete warehouse — it has linked zones, racks, or inventory records. Remove those first.');
+      this.logger.error(error.message, error.stack);
+      throw new InternalServerErrorException(error.message);
     }
   }
 }

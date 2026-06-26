@@ -1,4 +1,4 @@
-import { Injectable, NotFoundException, ConflictException, BadRequestException, HttpException, InternalServerErrorException } from '@nestjs/common';
+import { Injectable, NotFoundException, ConflictException, BadRequestException, HttpException, InternalServerErrorException, Logger } from '@nestjs/common';
 import { DatabaseService } from '../database/database.service';
 import { CreateRackDto } from './dto/create-rack.dto';
 import { UpdateRackDto } from './dto/update-rack.dto';
@@ -18,6 +18,8 @@ const RACK_ZONE_SQL = `
 
 @Injectable()
 export class RacksService {
+  private readonly logger = new Logger(RacksService.name);
+
   constructor(private db: DatabaseService) {}
 
   async findAll(query: PaginationDto & { zoneId?: string; warehouseId?: string }) {
@@ -51,9 +53,10 @@ export class RacksService {
       );
 
       return paginate(data, Number(count), query.page, query.limit);
-    } catch (error) {
+    } catch (error: any) {
       if (error instanceof HttpException) throw error;
-      throw new InternalServerErrorException('An unexpected error occurred');
+      this.logger.error(error.message, error.stack);
+      throw new InternalServerErrorException(error.message);
     }
   }
 
@@ -62,9 +65,10 @@ export class RacksService {
       const rack = await this.db.queryOne(`${RACK_ZONE_SQL} WHERE r.id = $1`, [id]);
       if (!rack) throw new NotFoundException(`Rack ${id} not found`);
       return rack;
-    } catch (error) {
+    } catch (error: any) {
       if (error instanceof HttpException) throw error;
-      throw new InternalServerErrorException('An unexpected error occurred');
+      this.logger.error(error.message, error.stack);
+      throw new InternalServerErrorException(error.message);
     }
   }
 
@@ -73,9 +77,10 @@ export class RacksService {
       const rack = await this.db.queryOne(`SELECT * FROM racks WHERE barcode = $1`, [barcode]);
       if (!rack) throw new NotFoundException(`Rack with barcode '${barcode}' not found`);
       return rack;
-    } catch (error) {
+    } catch (error: any) {
       if (error instanceof HttpException) throw error;
-      throw new InternalServerErrorException('An unexpected error occurred');
+      this.logger.error(error.message, error.stack);
+      throw new InternalServerErrorException(error.message);
     }
   }
 
@@ -96,9 +101,10 @@ export class RacksService {
       `, [uuidv4(), dto.zoneId, dto.rackCode, dto.barcode, dto.binCount ?? 1, dto.isActive ?? true]);
 
       return this.findOne(row.id);
-    } catch (error) {
+    } catch (error: any) {
       if (error instanceof HttpException) throw error;
-      throw new InternalServerErrorException('An unexpected error occurred');
+      this.logger.error(error.message, error.stack);
+      throw new InternalServerErrorException(error.message);
     }
   }
 
@@ -132,9 +138,10 @@ export class RacksService {
       params.push(id);
       await this.db.query(`UPDATE racks SET ${fields.join(', ')} WHERE id = $${params.length}`, params);
       return this.findOne(id);
-    } catch (error) {
+    } catch (error: any) {
       if (error instanceof HttpException) throw error;
-      throw new InternalServerErrorException('An unexpected error occurred');
+      this.logger.error(error.message, error.stack);
+      throw new InternalServerErrorException(error.message);
     }
   }
 
@@ -143,10 +150,11 @@ export class RacksService {
       await this.findOne(id);
       const [row] = await this.db.query(`DELETE FROM racks WHERE id = $1 RETURNING *`, [id]);
       return row;
-    } catch (error) {
+    } catch (error: any) {
       if (error instanceof HttpException) throw error;
-      if ((error as any).code === '23503') throw new BadRequestException('Cannot delete rack — it has linked inventory records. Remove those first.');
-      throw new InternalServerErrorException('An unexpected error occurred');
+      if (error.code === '23503') throw new BadRequestException('Cannot delete rack — it has linked inventory records. Remove those first.');
+      this.logger.error(error.message, error.stack);
+      throw new InternalServerErrorException(error.message);
     }
   }
 }

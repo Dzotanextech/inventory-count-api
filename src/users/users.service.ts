@@ -1,4 +1,4 @@
-import { Injectable, NotFoundException, ConflictException, BadRequestException, HttpException, InternalServerErrorException } from '@nestjs/common';
+import { Injectable, NotFoundException, ConflictException, BadRequestException, HttpException, InternalServerErrorException, Logger } from '@nestjs/common';
 import { DatabaseService } from '../database/database.service';
 import { CreateUserDto } from './dto/create-user.dto';
 import { UpdateUserDto } from './dto/update-user.dto';
@@ -13,6 +13,8 @@ const USER_COLS = `
 
 @Injectable()
 export class UsersService {
+  private readonly logger = new Logger(UsersService.name);
+
   constructor(private db: DatabaseService) {}
 
   async findAll(query: PaginationDto) {
@@ -45,9 +47,10 @@ export class UsersService {
       );
 
       return paginate(data, Number(count), query.page, query.limit);
-    } catch (error) {
+    } catch (error: any) {
       if (error instanceof HttpException) throw error;
-      throw new InternalServerErrorException('An unexpected error occurred');
+      this.logger.error(error.message, error.stack);
+      throw new InternalServerErrorException(error.message);
     }
   }
 
@@ -60,9 +63,10 @@ export class UsersService {
       `, [id]);
       if (!user) throw new NotFoundException(`User ${id} not found`);
       return user;
-    } catch (error) {
+    } catch (error: any) {
       if (error instanceof HttpException) throw error;
-      throw new InternalServerErrorException('An unexpected error occurred');
+      this.logger.error(error.message, error.stack);
+      throw new InternalServerErrorException(error.message);
     }
   }
 
@@ -81,9 +85,10 @@ export class UsersService {
       `, [id, dto.name, dto.email, passwordHash, dto.roleId, dto.isActive ?? true, now]);
 
       return this.findOne(id);
-    } catch (error) {
+    } catch (error: any) {
       if (error instanceof HttpException) throw error;
-      throw new InternalServerErrorException('An unexpected error occurred');
+      this.logger.error(error.message, error.stack);
+      throw new InternalServerErrorException(error.message);
     }
   }
 
@@ -119,9 +124,10 @@ export class UsersService {
       );
 
       return this.findOne(id);
-    } catch (error) {
+    } catch (error: any) {
       if (error instanceof HttpException) throw error;
-      throw new InternalServerErrorException('An unexpected error occurred');
+      this.logger.error(error.message, error.stack);
+      throw new InternalServerErrorException(error.message);
     }
   }
 
@@ -130,10 +136,11 @@ export class UsersService {
       await this.findOne(id);
       await this.db.query(`DELETE FROM users WHERE id = $1`, [id]);
       return { message: 'User deleted successfully' };
-    } catch (error) {
+    } catch (error: any) {
       if (error instanceof HttpException) throw error;
-      if ((error as any).code === '23503') throw new BadRequestException('Cannot delete user — they have linked records. Reassign or remove those first.');
-      throw new InternalServerErrorException('An unexpected error occurred');
+      if (error.code === '23503') throw new BadRequestException('Cannot delete user — they have linked records. Reassign or remove those first.');
+      this.logger.error(error.message, error.stack);
+      throw new InternalServerErrorException(error.message);
     }
   }
 
@@ -145,9 +152,10 @@ export class UsersService {
         [!user.isActive, id],
       );
       return this.findOne(id);
-    } catch (error) {
+    } catch (error: any) {
       if (error instanceof HttpException) throw error;
-      throw new InternalServerErrorException('An unexpected error occurred');
+      this.logger.error(error.message, error.stack);
+      throw new InternalServerErrorException(error.message);
     }
   }
 }

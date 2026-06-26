@@ -1,4 +1,4 @@
-import { Injectable, NotFoundException, HttpException, InternalServerErrorException } from '@nestjs/common';
+import { Injectable, NotFoundException, HttpException, InternalServerErrorException, Logger } from '@nestjs/common';
 import { DatabaseService } from '../database/database.service';
 import { CreateInventoryLocationDto } from './dto/create-inventory-location.dto';
 import { UpdateInventoryLocationDto } from './dto/update-inventory-location.dto';
@@ -20,6 +20,8 @@ const LOCATION_SQL = `
 
 @Injectable()
 export class InventoryLocationsService {
+  private readonly logger = new Logger(InventoryLocationsService.name);
+
   constructor(private db: DatabaseService) {}
 
   async findAll(query: PaginationDto & { warehouseId?: string; productId?: string; rackId?: string }) {
@@ -48,9 +50,10 @@ export class InventoryLocationsService {
       );
 
       return paginate(data, Number(count), query.page, query.limit);
-    } catch (error) {
+    } catch (error: any) {
       if (error instanceof HttpException) throw error;
-      throw new InternalServerErrorException('An unexpected error occurred');
+      this.logger.error(error.message, error.stack);
+      throw new InternalServerErrorException(error.message);
     }
   }
 
@@ -59,9 +62,10 @@ export class InventoryLocationsService {
       const loc = await this.db.queryOne(`${LOCATION_SQL} WHERE il.id = $1`, [id]);
       if (!loc) throw new NotFoundException(`Inventory location ${id} not found`);
       return loc;
-    } catch (error) {
+    } catch (error: any) {
       if (error instanceof HttpException) throw error;
-      throw new InternalServerErrorException('An unexpected error occurred');
+      this.logger.error(error.message, error.stack);
+      throw new InternalServerErrorException(error.message);
     }
   }
 
@@ -86,9 +90,10 @@ export class InventoryLocationsService {
       `, [uuidv4(), dto.warehouseId, dto.rackId ?? null, dto.productId, dto.batchId ?? null, dto.quantity]);
 
       return this.findOne(row.id);
-    } catch (error) {
+    } catch (error: any) {
       if (error instanceof HttpException) throw error;
-      throw new InternalServerErrorException('An unexpected error occurred');
+      this.logger.error(error.message, error.stack);
+      throw new InternalServerErrorException(error.message);
     }
   }
 
@@ -97,9 +102,10 @@ export class InventoryLocationsService {
       await this.findOne(id);
       await this.db.query(`UPDATE inventory_locations SET quantity = $1 WHERE id = $2`, [dto.quantity, id]);
       return this.findOne(id);
-    } catch (error) {
+    } catch (error: any) {
       if (error instanceof HttpException) throw error;
-      throw new InternalServerErrorException('An unexpected error occurred');
+      this.logger.error(error.message, error.stack);
+      throw new InternalServerErrorException(error.message);
     }
   }
 
@@ -108,9 +114,10 @@ export class InventoryLocationsService {
       await this.findOne(id);
       const [row] = await this.db.query(`DELETE FROM inventory_locations WHERE id = $1 RETURNING *`, [id]);
       return row;
-    } catch (error) {
+    } catch (error: any) {
       if (error instanceof HttpException) throw error;
-      throw new InternalServerErrorException('An unexpected error occurred');
+      this.logger.error(error.message, error.stack);
+      throw new InternalServerErrorException(error.message);
     }
   }
 
@@ -127,9 +134,10 @@ export class InventoryLocationsService {
         LEFT JOIN racks r ON r.id = il."rackId"
         WHERE il."warehouseId" = $1
       `, [warehouseId]);
-    } catch (error) {
+    } catch (error: any) {
       if (error instanceof HttpException) throw error;
-      throw new InternalServerErrorException('An unexpected error occurred');
+      this.logger.error(error.message, error.stack);
+      throw new InternalServerErrorException(error.message);
     }
   }
 }

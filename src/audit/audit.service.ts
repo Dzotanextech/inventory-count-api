@@ -1,4 +1,4 @@
-import { Injectable, HttpException, InternalServerErrorException } from '@nestjs/common';
+import { Injectable, HttpException, InternalServerErrorException, Logger } from '@nestjs/common';
 import { DatabaseService } from '../database/database.service';
 import { PaginationDto, paginate } from '../common/dto/pagination.dto';
 import { v4 as uuidv4 } from 'uuid';
@@ -14,6 +14,8 @@ interface LogParams {
 
 @Injectable()
 export class AuditService {
+  private readonly logger = new Logger(AuditService.name);
+
   constructor(private db: DatabaseService) {}
 
   async log(params: LogParams) {
@@ -28,9 +30,10 @@ export class AuditService {
         params.performedById,
       ]);
       return row;
-    } catch (error) {
+    } catch (error: any) {
       if (error instanceof HttpException) throw error;
-      throw new InternalServerErrorException('An unexpected error occurred');
+      this.logger.error(error.message, error.stack);
+      throw new InternalServerErrorException(error.message);
     }
   }
 
@@ -64,9 +67,10 @@ export class AuditService {
       );
 
       return paginate(data, Number(count), query.page, query.limit);
-    } catch (error) {
+    } catch (error: any) {
       if (error instanceof HttpException) throw error;
-      throw new InternalServerErrorException('An unexpected error occurred');
+      this.logger.error(error.message, error.stack);
+      throw new InternalServerErrorException(error.message);
     }
   }
 
@@ -80,9 +84,10 @@ export class AuditService {
         WHERE al."entityType" = $1 AND al."entityId" = $2
         ORDER BY al."createdAt" ASC
       `, [entityType, entityId]);
-    } catch (error) {
+    } catch (error: any) {
       if (error instanceof HttpException) throw error;
-      throw new InternalServerErrorException('An unexpected error occurred');
+      this.logger.error(error.message, error.stack);
+      throw new InternalServerErrorException(error.message);
     }
   }
 }

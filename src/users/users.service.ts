@@ -50,7 +50,7 @@ export class UsersService {
     } catch (error: any) {
       if (error instanceof HttpException) throw error;
       this.logger.error(error.message, error.stack);
-      throw new InternalServerErrorException(error.message);
+      throw new InternalServerErrorException();
     }
   }
 
@@ -66,7 +66,7 @@ export class UsersService {
     } catch (error: any) {
       if (error instanceof HttpException) throw error;
       this.logger.error(error.message, error.stack);
-      throw new InternalServerErrorException(error.message);
+      throw new InternalServerErrorException();
     }
   }
 
@@ -88,7 +88,7 @@ export class UsersService {
     } catch (error: any) {
       if (error instanceof HttpException) throw error;
       this.logger.error(error.message, error.stack);
-      throw new InternalServerErrorException(error.message);
+      throw new InternalServerErrorException();
     }
   }
 
@@ -127,7 +127,7 @@ export class UsersService {
     } catch (error: any) {
       if (error instanceof HttpException) throw error;
       this.logger.error(error.message, error.stack);
-      throw new InternalServerErrorException(error.message);
+      throw new InternalServerErrorException();
     }
   }
 
@@ -140,7 +140,7 @@ export class UsersService {
       if (error instanceof HttpException) throw error;
       if (error.code === '23503') throw new BadRequestException('Cannot delete user — they have linked records. Reassign or remove those first.');
       this.logger.error(error.message, error.stack);
-      throw new InternalServerErrorException(error.message);
+      throw new InternalServerErrorException();
     }
   }
 
@@ -155,7 +155,7 @@ export class UsersService {
     } catch (error: any) {
       if (error instanceof HttpException) throw error;
       this.logger.error(error.message, error.stack);
-      throw new InternalServerErrorException(error.message);
+      throw new InternalServerErrorException();
     }
   }
 }

@@ -1,4 +1,5 @@
 import { Injectable, NotFoundException, BadRequestException, HttpException, InternalServerErrorException, Logger } from '@nestjs/common';
+import { PoolClient } from 'pg';
 import { DatabaseService } from '../database/database.service';
 import { AuditService } from '../audit/audit.service';
 import { CreateInventoryCountDto } from './dto/create-inventory-count.dto';
@@ -64,7 +65,7 @@ export class InventoryCountsService {
     } catch (error: any) {
       if (error instanceof HttpException) throw error;
       this.logger.error(error.message, error.stack);
-      throw new InternalServerErrorException(error.message);
+      throw new InternalServerErrorException();
     }
   }
 
@@ -101,24 +102,32 @@ export class InventoryCountsService {
     } catch (error: any) {
       if (error instanceof HttpException) throw error;
       this.logger.error(error.message, error.stack);
-      throw new InternalServerErrorException(error.message);
+      throw new InternalServerErrorException();
     }
   }
 
   async create(dto: CreateInventoryCountDto, userId: string) {
     try {
-      const countNumber = await this.generateCountNumber();
+      if (dto.countType === InventoryCountType.CATEGORY && !dto.categoryId) {
+        throw new BadRequestException('categoryId is required for a CATEGORY count');
+      }
+      if (dto.countType === InventoryCountType.PRODUCT && !dto.productIds?.length) {
+        throw new BadRequestException('productIds is required for a PRODUCT count');
+      }
+      if (dto.countType === InventoryCountType.RACK && !dto.rackIds?.length) {
+        throw new BadRequestException('rackIds is required for a RACK count');
+      }
 
       const locationConditions: string[] = [`il."warehouseId" = $1`];
       const locationParams: any[] = [dto.warehouseId];
 
-      if (dto.countType === InventoryCountType.CATEGORY && dto.categoryId) {
+      if (dto.countType === InventoryCountType.CATEGORY) {
         locationParams.push(dto.categoryId);
         locationConditions.push(`p."categoryId" = $${locationParams.length}`);
-      } else if (dto.countType === InventoryCountType.PRODUCT && dto.productIds?.length) {
+      } else if (dto.countType === InventoryCountType.PRODUCT) {
         locationParams.push(dto.productIds);
         locationConditions.push(`il."productId" = ANY($${locationParams.length})`);
-      } else if (dto.countType === InventoryCountType.RACK && dto.rackIds?.length) {
+      } else if (dto.countType === InventoryCountType.RACK) {
         locationParams.push(dto.rackIds);
         locationConditions.push(`il."rackId" = ANY($${locationParams.length})`);
       }
@@ -133,23 +142,32 @@ export class InventoryCountsService {
       const countId = uuidv4();
       const now = new Date();
 
-      await this.db.query(`
-        INSERT INTO inventory_counts (
-          id, "countNumber", "warehouseId", "countType", status, "countDate", "dueDate",
-          "createdById", "totalVarianceValue", notes, "createdAt", "updatedAt"
-        ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,0,$9,$10,$10)
-      `, [
-        countId, countNumber, dto.warehouseId, dto.countType, InventoryCountStatus.DRAFT,
-        new Date(dto.countDate), dto.dueDate ? new Date(dto.dueDate) : null,
-        userId, dto.notes ?? null, now,
-      ]);
+      const countNumber = await this.db.transaction(async (client) => {
+        // Serializes count-number generation so concurrent creates on the same day can't collide.
+        await client.query(`SELECT pg_advisory_xact_lock(hashtext($1))`, ['inventory_count_number']);
 
-      for (const loc of locations) {
-        await this.db.query(`
-          INSERT INTO inventory_count_items (id, "inventoryCountId", "productId", "batchId", "rackId", "systemQty")
-          VALUES ($1, $2, $3, $4, $5, $6)
-        `, [uuidv4(), countId, loc.productId, loc.batchId, loc.rackId, loc.quantity]);
-      }
+        const countNumber = await this.generateCountNumber(client);
+
+        await client.query(`
+          INSERT INTO inventory_counts (
+            id, "countNumber", "warehouseId", "countType", status, "countDate", "dueDate",
+            "createdById", "totalVarianceValue", notes, "createdAt", "updatedAt"
+          ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,0,$9,$10,$10)
+        `, [
+          countId, countNumber, dto.warehouseId, dto.countType, InventoryCountStatus.DRAFT,
+          new Date(dto.countDate), dto.dueDate ? new Date(dto.dueDate) : null,
+          userId, dto.notes ?? null, now,
+        ]);
+
+        for (const loc of locations) {
+          await client.query(`
+            INSERT INTO inventory_count_items (id, "inventoryCountId", "productId", "batchId", "rackId", "systemQty")
+            VALUES ($1, $2, $3, $4, $5, $6)
+          `, [uuidv4(), countId, loc.productId, loc.batchId, loc.rackId, loc.quantity]);
+        }
+
+        return countNumber;
+      });
 
       await this.auditService.log({
         entityType: 'InventoryCount', entityId: countId, action: 'CREATE',
@@ -161,7 +179,7 @@ export class InventoryCountsService {
     } catch (error: any) {
       if (error instanceof HttpException) throw error;
       this.logger.error(error.message, error.stack);
-      throw new InternalServerErrorException(error.message);
+      throw new InternalServerErrorException();
     }
   }
 
@@ -184,7 +202,7 @@ export class InventoryCountsService {
     } catch (error: any) {
       if (error instanceof HttpException) throw error;
       this.logger.error(error.message, error.stack);
-      throw new InternalServerErrorException(error.message);
+      throw new InternalServerErrorException();
     }
   }
 
@@ -192,6 +210,13 @@ export class InventoryCountsService {
     try {
       const count = await this.findOne(id);
       this.assertStatus(count.status, [InventoryCountStatus.IN_PROGRESS]);
+
+      const uncounted = (count.items as any[]).filter((item) => item.physicalQty === null);
+      if (uncounted.length > 0) {
+        throw new BadRequestException(
+          `Cannot submit: ${uncounted.length} item(s) have not been physically counted yet`,
+        );
+      }
 
       await this.db.transaction(async (client) => {
         await client.query(`
@@ -216,7 +241,7 @@ export class InventoryCountsService {
     } catch (error: any) {
       if (error instanceof HttpException) throw error;
       this.logger.error(error.message, error.stack);
-      throw new InternalServerErrorException(error.message);
+      throw new InternalServerErrorException();
     }
   }
 
@@ -254,7 +279,7 @@ export class InventoryCountsService {
     } catch (error: any) {
       if (error instanceof HttpException) throw error;
       this.logger.error(error.message, error.stack);
-      throw new InternalServerErrorException(error.message);
+      throw new InternalServerErrorException();
     }
   }
 
@@ -281,7 +306,7 @@ export class InventoryCountsService {
     } catch (error: any) {
       if (error instanceof HttpException) throw error;
       this.logger.error(error.message, error.stack);
-      throw new InternalServerErrorException(error.message);
+      throw new InternalServerErrorException();
     }
   }
 
@@ -308,7 +333,7 @@ export class InventoryCountsService {
     } catch (error: any) {
       if (error instanceof HttpException) throw error;
       this.logger.error(error.message, error.stack);
-      throw new InternalServerErrorException(error.message);
+      throw new InternalServerErrorException();
     }
   }
 
@@ -343,14 +368,14 @@ export class InventoryCountsService {
     }
   }
 
-  private async generateCountNumber(): Promise<string> {
+  private async generateCountNumber(client: PoolClient): Promise<string> {
     const now = new Date();
     const y = now.getFullYear();
     const m = String(now.getMonth() + 1).padStart(2, '0');
     const d = String(now.getDate()).padStart(2, '0');
 
     const todayStart = new Date(y, now.getMonth(), now.getDate());
-    const [{ count }] = await this.db.query<{ count: string }>(
+    const { rows: [{ count }] } = await client.query<{ count: string }>(
       `SELECT COUNT(*)::int AS count FROM inventory_counts WHERE "createdAt" >= $1`,
       [todayStart],
     );

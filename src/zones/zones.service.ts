@@ -53,7 +53,7 @@ export class ZonesService {
     } catch (error: any) {
       if (error instanceof HttpException) throw error;
       this.logger.error(error.message, error.stack);
-      throw new InternalServerErrorException(error.message);
+      throw new InternalServerErrorException();
     }
   }
 
@@ -73,7 +73,7 @@ export class ZonesService {
     } catch (error: any) {
       if (error instanceof HttpException) throw error;
       this.logger.error(error.message, error.stack);
-      throw new InternalServerErrorException(error.message);
+      throw new InternalServerErrorException();
     }
   }
 
@@ -94,7 +94,7 @@ export class ZonesService {
     } catch (error: any) {
       if (error instanceof HttpException) throw error;
       this.logger.error(error.message, error.stack);
-      throw new InternalServerErrorException(error.message);
+      throw new InternalServerErrorException();
     }
   }
 
@@ -124,7 +124,7 @@ export class ZonesService {
     } catch (error: any) {
       if (error instanceof HttpException) throw error;
       this.logger.error(error.message, error.stack);
-      throw new InternalServerErrorException(error.message);
+      throw new InternalServerErrorException();
     }
   }
 
@@ -137,7 +137,7 @@ export class ZonesService {
       if (error instanceof HttpException) throw error;
       if (error.code === '23503') throw new BadRequestException('Cannot delete zone — it has linked racks. Remove those first.');
       this.logger.error(error.message, error.stack);
-      throw new InternalServerErrorException(error.message);
+      throw new InternalServerErrorException();
     }
   }
 }

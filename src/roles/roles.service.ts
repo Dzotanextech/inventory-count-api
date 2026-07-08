@@ -15,7 +15,7 @@ export class RolesService {
     } catch (error: any) {
       if (error instanceof HttpException) throw error;
       this.logger.error(error.message, error.stack);
-      throw new InternalServerErrorException(error.message);
+      throw new InternalServerErrorException();
     }
   }
 
@@ -27,7 +27,7 @@ export class RolesService {
     } catch (error: any) {
       if (error instanceof HttpException) throw error;
       this.logger.error(error.message, error.stack);
-      throw new InternalServerErrorException(error.message);
+      throw new InternalServerErrorException();
     }
   }
 
@@ -44,7 +44,7 @@ export class RolesService {
     } catch (error: any) {
       if (error instanceof HttpException) throw error;
       this.logger.error(error.message, error.stack);
-      throw new InternalServerErrorException(error.message);
+      throw new InternalServerErrorException();
     }
   }
 
@@ -57,7 +57,7 @@ export class RolesService {
       if (error instanceof HttpException) throw error;
       if (error.code === '23503') throw new BadRequestException('Cannot delete role — it is assigned to one or more users. Reassign those users first.');
       this.logger.error(error.message, error.stack);
-      throw new InternalServerErrorException(error.message);
+      throw new InternalServerErrorException();
     }
   }
 }
